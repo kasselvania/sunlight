@@ -212,6 +212,16 @@ static NSTextField *Label(NSString *text, CGFloat size) {
 @property NSMutableArray<NSMutableSet<NSNumber *> *> *sequences;
 @property NSUInteger completeFrames;
 @property NSUInteger generation;
+@property NSButton *startButton;
+@property NSButton *stopButton;
+@property NSMutableArray<NSDictionary *> *startupEvents;
+@property NSUInteger streamsStarted;
+@property NSTextField *notice;
+@property NSButton *reopenButton;
+@property NSTimer *permissionTimer;
+@property BOOL permissionRequested;
+@property BOOL liveAnnounced;
+@property NSString *launchRecord;
 @end
 
 @implementation Viewer
@@ -219,22 +229,34 @@ static NSTextField *Label(NSString *text, CGFloat size) {
     (void)notification;
     [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
     NSMenu *menu = [NSMenu new]; NSMenuItem *item = [NSMenuItem new]; [menu addItem:item];
-    item.submenu = [NSMenu new]; [item.submenu addItemWithTitle:@"Quit Virtual Display Canvas" action:@selector(terminate:) keyEquivalent:@"q"];
+    item.submenu = [NSMenu new]; [item.submenu addItemWithTitle:@"Quit Sunlight Canvas Lab" action:@selector(terminate:) keyEquivalent:@"q"];
     NSApp.mainMenu = menu;
     self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(160,100,980,700) styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|NSWindowStyleMaskResizable backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"Sunlight — virtual-display canvas"; self.window.releasedWhenClosed = NO; self.window.delegate = self;
+    self.window.title = @"Sunlight Canvas Lab"; self.window.releasedWhenClosed = NO; self.window.delegate = self;
     self.window.minSize=NSMakeSize(900,650);
     NSView *content = self.window.contentView;
     NSTextField *title = Label(@"Real app windows, one live display feed, SIP enabled", 20);
     NSTextField *help = Label(@"Start creates one temporary virtual monitor for three synthetic windows. Drag, scroll or pinch inside the canvas.", 12);
     NSButton *start = [NSButton buttonWithTitle:@"Start virtual canvas" target:self action:@selector(start:)];
     NSButton *stop = [NSButton buttonWithTitle:@"Stop and remove monitor" target:self action:@selector(stop:)];
-    NSButton *access = [NSButton buttonWithTitle:@"Allow Screen Recording…" target:self action:@selector(access:)];
+    self.startButton=start; self.stopButton=stop; stop.enabled=NO;
+    NSButton *access = [NSButton buttonWithTitle:@"Permissions…" target:self action:@selector(access:)];
     NSButton *fit = [NSButton buttonWithTitle:@"Fit" target:self action:@selector(fit:)];
-    NSStackView *buttons = [NSStackView stackViewWithViews:@[start,stop,fit,access]]; buttons.spacing=10;
+    self.reopenButton=[NSButton buttonWithTitle:@"Reopen after allowing" target:self action:@selector(reopen:)];
+    self.reopenButton.hidden=YES;
+    NSStackView *buttons = [NSStackView stackViewWithViews:@[start,stop,fit,access,self.reopenButton]]; buttons.spacing=10; buttons.detachesHiddenViews=YES;
     self.status=Label(@"Ready. The source windows will live on the virtual monitor; their live contents should appear here.",12);
     self.status.maximumNumberOfLines=3; self.status.lineBreakMode=NSLineBreakByWordWrapping;
     self.canvas=[[Canvas alloc] initWithFrame:NSZeroRect];
+    self.notice=Label(@"Starting the canvas…",18);
+    self.notice.textColor=NSColor.whiteColor; self.notice.alignment=NSTextAlignmentCenter;
+    self.notice.maximumNumberOfLines=5; self.notice.lineBreakMode=NSLineBreakByWordWrapping;
+    self.notice.translatesAutoresizingMaskIntoConstraints=NO; [self.canvas addSubview:self.notice];
+    [NSLayoutConstraint activateConstraints:@[
+        [self.notice.centerXAnchor constraintEqualToAnchor:self.canvas.centerXAnchor],
+        [self.notice.centerYAnchor constraintEqualToAnchor:self.canvas.centerYAnchor],
+        [self.notice.widthAnchor constraintEqualToConstant:620]
+    ]];
     for (NSView *view in @[title,help,buttons,self.canvas,self.status]) { view.translatesAutoresizingMaskIntoConstraints=NO; [content addSubview:view]; }
     [NSLayoutConstraint activateConstraints:@[
         [title.leadingAnchor constraintEqualToAnchor:content.leadingAnchor constant:20], [title.topAnchor constraintEqualToAnchor:content.topAnchor constant:18],
@@ -246,22 +268,86 @@ static NSTextField *Label(NSString *text, CGFloat size) {
         [self.status.bottomAnchor constraintEqualToAnchor:content.bottomAnchor constant:-14], [self.status.heightAnchor constraintGreaterThanOrEqualToConstant:35]
     ]];
     [self.window makeKeyAndOrderFront:nil];
-    if(self.trial) [self start:nil];
+    NSString *launchDirectory=[NSTemporaryDirectory() stringByAppendingPathComponent:[@"sunlight-canvas-launch-" stringByAppendingString:NSUUID.UUID.UUIDString]];
+    [NSFileManager.defaultManager createDirectoryAtPath:launchDirectory withIntermediateDirectories:NO attributes:@{NSFilePosixPermissions:@0700} error:NULL];
+    self.launchRecord=[launchDirectory stringByAppendingPathComponent:@"launch.json"];
+    if(self.trial || CGPreflightScreenCaptureAccess()) [self start:nil];
+    else { [self permissionState]; dispatch_async(dispatch_get_main_queue(),^{[self access:nil];}); }
+    if(!self.trial) [NSApp activateIgnoringOtherApps:YES];
 }
-- (void)access:(id)sender { (void)sender; if(!CGPreflightScreenCaptureAccess()) CGRequestScreenCaptureAccess(); }
+- (void)recordLaunch:(NSString *)phase {
+    WriteJSON(@{@"pid":@(getpid()),@"ppid":@(getppid()),@"window_id":@(self.window.windowNumber),
+        @"app_path":NSBundle.mainBundle.bundlePath,@"build":NSBundle.mainBundle.infoDictionary[@"CFBundleVersion"],
+        @"phase":phase,@"screen_recording":@(CGPreflightScreenCaptureAccess()),@"trial":@(self.trial),
+        @"run":self.directory?:@""},self.launchRecord);
+}
+- (void)permissionState {
+    self.startButton.enabled=YES; self.startButton.title=@"Enable Screen Recording";
+    self.stopButton.enabled=NO; self.reopenButton.hidden=NO;
+    self.notice.hidden=NO;
+    self.notice.stringValue=@"One-time macOS permission is needed.\n\nClick Enable Screen Recording and allow Sunlight Canvas Lab.\nIf macOS asks you to quit and reopen, do so.\nThe canvas starts automatically once access is available.";
+    self.status.stringValue=@"SIP stays enabled. No virtual monitor is created while permission is pending.";
+    [self recordLaunch:@"awaiting_permission"];
+}
+- (void)access:(id)sender {
+    (void)sender;
+    if(CGPreflightScreenCaptureAccess()){[self.permissionTimer invalidate];self.permissionTimer=nil;[self start:nil];return;}
+    [self permissionState];
+    BOOL allowed=NO;
+    if(!self.permissionRequested){self.permissionRequested=YES;allowed=CGRequestScreenCaptureAccess();}
+    if(!allowed) [[NSWorkspace sharedWorkspace] openURL:[NSURL URLWithString:@"x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"]];
+    if(!self.permissionTimer){
+        __weak Viewer *weakSelf=self;
+        self.permissionTimer=[NSTimer scheduledTimerWithTimeInterval:1 repeats:YES block:^(NSTimer *timer){
+            Viewer *viewer=weakSelf;
+            if(!viewer){[timer invalidate];return;}
+            if(CGPreflightScreenCaptureAccess()){
+                [timer invalidate];viewer.permissionTimer=nil;viewer.reopenButton.hidden=YES;[viewer start:nil];
+            }
+        }];
+    }
+}
+- (void)reopen:(id)sender {
+    (void)sender;
+    [self.permissionTimer invalidate];self.permissionTimer=nil;
+    self.reopenButton.enabled=NO;self.startButton.enabled=NO;
+    NSWorkspaceOpenConfiguration *configuration=[NSWorkspaceOpenConfiguration configuration];
+    configuration.createsNewApplicationInstance=YES; configuration.activates=YES;
+    [[NSWorkspace sharedWorkspace] openApplicationAtURL:NSBundle.mainBundle.bundleURL configuration:configuration completionHandler:^(NSRunningApplication *application,NSError *error){
+        dispatch_async(dispatch_get_main_queue(),^{
+            if(application && !error)[NSApp terminate:nil];
+            else {self.reopenButton.enabled=YES;self.startButton.enabled=YES;self.status.stringValue=@"Could not reopen automatically. Quit and open Sunlight Canvas Lab again.";}
+        });
+    }];
+}
 - (void)fit:(id)sender { (void)sender; [self.canvas fit]; }
+- (void)recordStartup:(NSString *)stage {
+    [self.startupEvents addObject:@{@"stage":stage,@"display_active":@(self.displayID && CGDisplayIsActive(self.displayID)),
+        @"display_bounds":self.displayID?NSStringFromRect(CGDisplayBounds(self.displayID)):@"",
+        @"screen_recording":@(CGPreflightScreenCaptureAccess()),@"failure":self.failure?:@""}];
+    WriteJSON(@{@"pid":@(getpid()),@"ppid":@(getppid()),@"app_path":NSBundle.mainBundle.bundlePath,
+        @"display_id":@(self.displayID),@"events":self.startupEvents},[self.directory stringByAppendingPathComponent:@"startup.json"]);
+}
 - (void)fail:(NSString *)message { self.failure=message; self.status.stringValue=message; [self stop:nil]; }
 - (void)start:(id)sender {
     (void)sender;
     if(self.display || self.fixture || self.stopping) return;
+    if(!self.trial && !CGPreflightScreenCaptureAccess()){[self access:nil];return;}
+    [self.permissionTimer invalidate]; self.permissionTimer=nil; self.reopenButton.hidden=YES;
+    self.startButton.title=@"Start virtual canvas"; self.notice.hidden=NO;self.notice.stringValue=@"Starting the virtual monitor and three live windows…";
     self.token=NSUUID.UUID.UUIDString;
     self.directory=[NSTemporaryDirectory() stringByAppendingPathComponent:[@"sunlight-virtual-canvas-" stringByAppendingString:self.token]];
     [NSFileManager.defaultManager createDirectoryAtPath:self.directory withIntermediateDirectories:NO attributes:@{NSFilePosixPermissions:@0700} error:NULL];
     self.beforeIDs=Displays(); self.beforeBounds=DisplayBounds(self.beforeIDs);
-    self.failure=nil; self.completeFrames=0; self.sequences=[NSMutableArray array];
+    self.failure=nil; self.completeFrames=0; self.sequences=[NSMutableArray array];self.liveAnnounced=NO;
+    self.startupEvents=[NSMutableArray array]; self.streamsStarted=0;
+    self.startButton.enabled=NO; self.stopButton.enabled=YES;
+    self.status.stringValue=@"Starting: creating the temporary virtual monitor…";
     self.preparingCapture=NO; self.startInFlight=NO; self.stopInFlight=NO; self.displayID=0; self.sourceInfo=nil;
     for(NSUInteger i=0;i<3;i++) [self.sequences addObject:[NSMutableSet set]];
     self.generation++;
+    [self recordStartup:@"permission_check"];
+    [self recordLaunch:@"starting"];
     if(!CGPreflightScreenCaptureAccess()) { [self fail:@"Screen Recording is not granted to this app. Use Allow Screen Recording, then reopen if macOS requests it."]; return; }
     if(!NSClassFromString(@"CGVirtualDisplay")) { [self fail:@"Virtual display API is unavailable."]; return; }
     CGVirtualDisplayDescriptor *descriptor=[[NSClassFromString(@"CGVirtualDisplayDescriptor") alloc] init];
@@ -277,16 +363,11 @@ static NSTextField *Label(NSString *text, CGFloat size) {
     if(!self.display || ![self.display applySettings:settings]) { [self fail:@"Could not create the virtual display."]; return; }
     self.displayID=self.display.displayID;
     if([self.beforeIDs containsObject:@(self.displayID)]) { [self fail:@"The new display did not have a distinct identity."]; return; }
-    CGFloat right=0; for(NSNumber *number in self.beforeIDs) right=MAX(right,CGRectGetMaxX(CGDisplayBounds(number.unsignedIntValue)));
-    CGDisplayConfigRef config=NULL;
-    if(CGBeginDisplayConfiguration(&config)!=kCGErrorSuccess) { [self fail:@"Could not configure the new display."]; return; }
-    CGError result=CGConfigureDisplayOrigin(config,self.displayID,(int32_t)ceil(right),0);
-    if(result==kCGErrorSuccess) result=CGCompleteDisplayConfiguration(config,kCGConfigureForSession);
-    else CGCancelDisplayConfiguration(config);
-    if(result!=kCGErrorSuccess) { [self fail:@"Could not place the virtual display beside the existing displays."]; return; }
-    self.status.stringValue=@"Virtual monitor created. Starting the separate synthetic app…";
-    WriteJSON(@{@"display_id":@(self.displayID), @"bounds":NSStringFromRect(CGDisplayBounds(self.displayID)), @"before_bounds":self.beforeBounds,
-        @"viewer_pid":@(NSProcessInfo.processInfo.processIdentifier), @"viewer_window_id":@(self.window.windowNumber)},[self.directory stringByAppendingPathComponent:@"display.json"]);
+    // macOS already arranges a newly created extended display. The canvas and
+    // source app use its actual bounds; neither needs it on a particular side.
+    // Avoid a global display-configuration transaction entirely.
+    [self recordStartup:@"waiting_for_display"];
+    self.status.stringValue=@"Starting: waiting for macOS to make the new monitor available…";
     self.deadline=CACurrentMediaTime()+8;
     __weak Viewer *weakSelf=self;
     self.poll=[NSTimer timerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer){(void)timer; [weakSelf prepare];}];
@@ -297,6 +378,10 @@ static NSTextField *Label(NSString *text, CGFloat size) {
     if(CACurrentMediaTime()>self.deadline) { [self fail:@"The virtual sources did not become available in time."]; return; }
     if(!CGDisplayIsActive(self.displayID)) return;
     if(!self.fixture) {
+        [self recordStartup:@"display_ready"];
+        WriteJSON(@{@"display_id":@(self.displayID),@"bounds":NSStringFromRect(CGDisplayBounds(self.displayID)),@"before_bounds":self.beforeBounds,
+            @"viewer_pid":@(getpid()),@"viewer_window_id":@(self.window.windowNumber)},[self.directory stringByAppendingPathComponent:@"display.json"]);
+        self.status.stringValue=@"Starting: opening the three test windows on the virtual monitor…";
         NSTask *task=[NSTask new]; self.fixture=task;
         task.executableURL=NSBundle.mainBundle.executableURL;
         task.arguments=@[@"--fixture",self.directory,self.token,[@(self.displayID) stringValue]];
@@ -310,6 +395,7 @@ static NSTextField *Label(NSString *text, CGFloat size) {
         });};
         NSError *error=nil;
         if(![task launchAndReturnError:&error]) { self.fixture=nil; [self fail:@"Could not start the separate source app."]; }
+        else [self recordStartup:@"source_started"];
         return;
     }
     NSData *data=[NSData dataWithContentsOfFile:[self.directory stringByAppendingPathComponent:@"sources.json"]];
@@ -363,6 +449,8 @@ static NSTextField *Label(NSString *text, CGFloat size) {
                 self.startInFlight=NO;
                 if(startError) { self.stream=nil; [self fail:[@"Capture failed: " stringByAppendingString:startError.localizedDescription]]; return; }
                 self.streamStarted=YES;
+                self.streamsStarted++;
+                [self recordStartup:@"capturing"];
                 if(self.stopping) { [self stop:nil]; return; }
                 self.status.stringValue=@"One display stream is running. The three tiles should show changing numbers. Drag, scroll or pinch here.";
                 if(self.trial) {
@@ -422,6 +510,10 @@ static NSTextField *Label(NSString *text, CGFloat size) {
         if(image)CGImageRelease(image);if(context)CGContextRelease(context);CGColorSpaceRelease(color);
     }
     CVPixelBufferUnlockBaseAddress(frame,kCVPixelBufferLock_ReadOnly);
+    if(!self.liveAnnounced){
+        BOOL live=YES;for(NSSet *values in self.sequences)if(values.count<2)live=NO;
+        if(live){self.liveAnnounced=YES;self.notice.hidden=YES;self.status.stringValue=@"Three live windows. Drag or scroll to pan, pinch to zoom. Stop removes the temporary monitor.";[self recordLaunch:@"live"];}
+    }
 }
 - (void)stream:(SCStream *)stream didStopWithError:(NSError *)error {
     dispatch_async(dispatch_get_main_queue(),^{ if(stream==self.stream && !self.stopping){self.streamStarted=NO;[self fail:[@"Capture stopped: " stringByAppendingString:error.localizedDescription]];} });
@@ -431,6 +523,7 @@ static NSTextField *Label(NSString *text, CGFloat size) {
     if(!self.directory || self.removingDisplay) return;
     if(!self.display && !self.fixture && !self.stream && !self.stopping && !self.failure) return;
     self.stopping=YES; [self.poll invalidate]; self.poll=nil;
+    self.stopButton.enabled=NO;
     if(self.startInFlight || self.stopInFlight) return;
     if(self.streamStarted) {
         self.streamStarted=NO;
@@ -463,15 +556,27 @@ static NSTextField *Label(NSString *text, CGFloat size) {
         for(NSSet *values in self.sequences){[counts addObject:@(values.count)]; if(values.count<5) advancing=NO;}
         BOOL passed=!self.failure && advancing && counts.count==3 && removed && unchanged && !self.fixture;
         NSDictionary *result=@{@"kind":@"virtual_display_capture_trial",@"passed":@(passed),@"failure":self.failure?:@"",
-            @"stream_count":@1,@"foreign_window_count":@(self.sourceInfo.count),@"complete_frames_received":@(self.completeFrames),
+            @"stream_count":@(self.streamsStarted),@"foreign_window_count":@(self.sourceInfo.count),@"complete_frames_received":@(self.completeFrames),
             @"distinct_decoded_sequences":counts,@"virtual_display_removed":@(removed),@"existing_display_bounds_unchanged":@(unchanged),
             @"source_process_stopped":@(!self.fixture),@"input_forwarding":@"not_implemented",@"physical_presentation":@"not_measured"};
         WriteJSON(result,[self.directory stringByAppendingPathComponent:@"result.json"]);
+        [self recordStartup:@"stopped"];
         self.stopping=NO; self.sourceInfo=nil; self.removingDisplay=NO;
+        self.startButton.enabled=YES;
+        self.notice.hidden=NO;
+        self.notice.stringValue=self.failure?:@"Stopped. Click Start virtual canvas to run again.";
+        [self recordLaunch:self.failure?@"failed":@"stopped"];
         if(self.failure) self.status.stringValue=self.failure;
         else self.status.stringValue=[NSString stringWithFormat:@"Stopped. Temporary monitor %@ and source app closed. Report: %@",removed?@"removed":@"removal unconfirmed",self.directory];
         if(self.trial){NSData *data=[NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:NULL];fwrite(data.bytes,1,data.length,stdout);fputc('\n',stdout);fflush(stdout);exit(passed?0:1);}
         if(self.quitWhenStopped) [NSApp replyToApplicationShouldTerminate:YES];
+        else if(self.failure) {
+            NSAlert *alert=[NSAlert new];
+            alert.messageText=self.streamsStarted?@"The canvas stopped":@"The canvas could not start";
+            alert.informativeText=self.failure;
+            [alert addButtonWithTitle:@"OK"];
+            [alert beginSheetModalForWindow:self.window completionHandler:nil];
+        }
     }];
     [NSRunLoop.mainRunLoop addTimer:wait forMode:NSRunLoopCommonModes];
 }

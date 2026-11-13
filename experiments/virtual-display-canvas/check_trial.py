@@ -1,77 +1,92 @@
 #!/usr/bin/env python3
-"""Run one finite native trial and capture only its own viewer before/after zoom."""
+"""Verify a normal LaunchServices launch of the installed app, including pixels."""
 import json
+import os
 import pathlib
 import subprocess
+import sys
 import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
-OUTPUT = ROOT / "build/virtual-display-canvas"
-EXECUTABLE = OUTPUT / "Virtual Display Canvas.app/Contents/MacOS/VirtualDisplayCanvas"
+OUTPUT = pathlib.Path(os.environ.get("VIRTUAL_CANVAS_BUILD_DIR", ROOT / "build/virtual-display-canvas"))
+BUNDLE = pathlib.Path(sys.argv[1] if len(sys.argv) == 2 else
+                      pathlib.Path.home() / "Applications/Sunlight Canvas Lab.app").resolve()
+TEMP = pathlib.Path(tempfile.gettempdir())
+
+
+def read_json(path):
+    return json.loads(path.read_text()) if path.exists() else None
+
+
+def wait_for(predicate, seconds, message):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        value = predicate()
+        if value:
+            return value
+        time.sleep(0.05)
+    raise RuntimeError(message)
 
 
 def main():
-    started = time.time()
-    process = subprocess.Popen(
-        [str(EXECUTABLE), "--trial"], stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, text=True,
-    )
-    run = None
-    try:
-        deadline = time.monotonic() + 10
-        while time.monotonic() < deadline and process.poll() is None:
-            candidates = sorted(
-                pathlib.Path(tempfile.gettempdir()).glob("sunlight-virtual-canvas-*"),
-                key=lambda path: path.stat().st_mtime, reverse=True,
-            )
-            for candidate in candidates[:2]:
-                image, metadata = candidate / "captured-bank.png", candidate / "display.json"
-                if image.exists() and image.stat().st_mtime >= started and metadata.exists():
-                    context = json.loads(metadata.read_text())
-                    if context.get("viewer_pid") == process.pid:
-                        run = candidate
-                        break
-            if run:
-                break
-            time.sleep(0.05)
-        if run is None:
-            raise RuntimeError("No captured source image from this trial became available")
+    if not BUNDLE.is_dir():
+        raise RuntimeError(f"App does not exist: {BUNDLE}")
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    previous = set(TEMP.glob("sunlight-canvas-launch-*"))
+    subprocess.run(["/usr/bin/open", "-g", "-n", str(BUNDLE), "--args", "--trial"], check=True)
 
+    def launched():
+        for directory in set(TEMP.glob("sunlight-canvas-launch-*")) - previous:
+            record = read_json(directory / "launch.json")
+            if record and record["trial"] and pathlib.Path(record["app_path"]).resolve() == BUNDLE:
+                return record
+        return None
+
+    launch = wait_for(launched, 10, "No launch receipt from this app appeared")
+    if launch["ppid"] != 1:
+        raise RuntimeError("This was not a LaunchServices launch")
+    run = pathlib.Path(launch["run"])
+    context = {"launch": launch, "run": str(run), "launch_method": "LaunchServices"}
+    (OUTPUT / "verified-trial-context.json").write_text(json.dumps(context, indent=2))
+
+    try:
+        wait_for(lambda: (run / "captured-bank.png").exists() or (run / "result.json").exists(),
+                 15, "No capture or failure report appeared")
+        early = read_json(run / "result.json")
+        if early:
+            raise RuntimeError(f"App stopped before visual verification: {early}")
         for index in range(2):
             if index:
-                deadline = time.monotonic() + 4
-                while not (run / "camera.json").exists() and time.monotonic() < deadline:
-                    time.sleep(0.05)
-                if not (run / "camera.json").exists():
-                    raise RuntimeError("The trial did not record its camera change")
+                wait_for(lambda: (run / "camera.json").exists(), 5,
+                         "No camera change was recorded")
                 time.sleep(0.15)
             subprocess.run([
-                "/usr/sbin/screencapture", "-x", "-o", "-l",
-                str(context["viewer_window_id"]),
+                "/usr/sbin/screencapture", "-x", "-o", "-l", str(launch["window_id"]),
                 str(OUTPUT / f"verified-viewer-{index + 1}.png"),
             ], check=True, capture_output=True, text=True)
 
-        stdout, stderr = process.communicate(timeout=10)
-        (OUTPUT / "verified-trial.json").write_text(stdout)
-        (OUTPUT / "verified-trial-stderr.txt").write_text(stderr)
-        (OUTPUT / "verified-trial-context.json").write_text(json.dumps({
-            "run": str(run), "viewer_pid": process.pid,
-            "viewer_window_id": context["viewer_window_id"],
-        }, indent=2))
-        report = json.loads(stdout)
-        print(json.dumps({"exit_code": process.returncode, "report": report, "run": str(run)}, indent=2))
-        if process.returncode or not report["passed"]:
-            raise RuntimeError("Capture/cleanup trial failed; retain the report")
-        # The PNGs must still be inspected. An accepted capture frame does not
-        # establish that a correctly cropped image was displayed by the viewer.
+        report = wait_for(lambda: read_json(run / "result.json"), 12,
+                          "App did not complete capture and cleanup")
+        (OUTPUT / "verified-trial.json").write_text(json.dumps(report, indent=2))
+        print(json.dumps({"launch": launch, "report": report, "run": str(run)}, indent=2))
+        if not report["passed"]:
+            raise RuntimeError("Capture/cleanup failed; retain the report")
+        # Inspect both PNGs as well. Decoded source pixels alone do not prove
+        # that the viewer's crops were visibly presented.
     finally:
-        if process.poll() is None:
-            try:
-                process.communicate(timeout=12)
-            except subprocess.TimeoutExpired:
-                process.terminate()
-                process.wait(timeout=3)
+        # Ask this exact owned app process to quit through AppKit if it remains
+        # alive, so even a verification failure follows the app's cleanup path.
+        alive = True
+        try:
+            os.kill(launch["pid"], 0)
+        except ProcessLookupError:
+            alive = False
+        if alive:
+            subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", "-e",
+                            'ObjC.import("AppKit"); '
+                            f'$.NSRunningApplication.runningApplicationWithProcessIdentifier({launch["pid"]}).terminate'],
+                           check=False, capture_output=True, text=True)
 
 
 if __name__ == "__main__":
