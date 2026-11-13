@@ -11,6 +11,7 @@ enum Settings {
     /// Without `screenCapture`, always scaled real windows: capture proxies are a feature behind that flag.
     static var renderer: Renderer {
         get {
+            if SIPRedesign.enabled { return .capture }
             if previewForced { return .capture }
             guard screenCapture else { return .realWindows }
             let value = ProcessInfo.processInfo.environment["CANVAS_RENDERER"]
@@ -486,7 +487,7 @@ enum Settings {
     /// app where the window is drawn (the window server hit-tests through the scale). Off by default.
     /// Settings › Experimental, or `defaults write com.spacefarm.sunlight UseScaledWindowsEnabled -bool YES`.
     static var useScaledWindows: Bool {
-        get { defaults.bool(forKey: useScaledWindowsKey) }
+        get { SIPRedesign.enabled || defaults.bool(forKey: useScaledWindowsKey) }
         set {
             defaults.set(newValue, forKey: useScaledWindowsKey)
             NotificationCenter.default.post(name: experimentalFeaturesDidChange, object: nil)
@@ -572,7 +573,7 @@ enum Settings {
     /// real thing. It ends by itself the first time live windows load, and never applies once screen
     /// capture mode is on by choice: that person chose capture and gets no badge.
     static var previewMode: Bool {
-        previewForced || previewMode(liveWindowsEverLoaded: liveWindowsEverLoaded, screenCapture: screenCapture)
+        !SIPRedesign.enabled && (previewForced || previewMode(liveWindowsEverLoaded: liveWindowsEverLoaded, screenCapture: screenCapture))
     }
 
     /// `Sunlight --preview-mode`: preview mode for this launch whatever the Mac, so it can be looked at
@@ -586,7 +587,7 @@ enum Settings {
 
     /// Whether the capture renderer streams at all: in screen capture mode and in preview mode. Otherwise
     /// it's only the stand-in while live windows come back, and every window and widget is a still.
-    static var capturesStream: Bool { screenCapture || previewMode }
+    static var capturesStream: Bool { SIPRedesign.enabled || screenCapture || previewMode }
 
     // MARK: Capture method
 

@@ -1,19 +1,25 @@
 # SIP-enabled virtual-display canvas
 
+This directory retains the earlier renderer proof. The current redesign starts from Sunlight's
+original Swift canvas; use `scripts/build-sip-redesign.sh` from the repository root. See the
+[redesign standards and current scope](../../README.md#sip-enabled-redesign-standards--this-branch).
+The two builds share the canonical Canvas Lab identity, so rebuilding this older experiment into
+`~/Applications` deliberately replaces the current redesign.
+
 Sunlight Canvas Lab is a native macOS renderer prototype for preserving Sunlight's
 canvas experience with SIP fully enabled. It puts three real windows from a
 separate process on one temporary virtual monitor, then renders their contents
 as independently positioned tiles using one ScreenCaptureKit display stream.
 
-## Installed app
+## Earlier renderer app (build 3)
 
-The verified local installation is:
+The earlier verified installation used:
 
 ```text
 ~/Applications/Sunlight Canvas Lab.app
 ```
 
-Open that app normally. With Screen Recording allowed, it starts automatically.
+This experiment opens normally. With Screen Recording allowed, it starts automatically.
 Three orange, green and purple tiles show advancing sequence numbers and moving
 dots. Drag or scroll inside the canvas to pan; pinch to zoom. **Fit** restores
 the layout. **Stop and remove monitor** ends capture, closes the separate source

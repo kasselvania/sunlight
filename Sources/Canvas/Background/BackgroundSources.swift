@@ -9,7 +9,7 @@ enum BackgroundSources {
     /// ~/Library/Application Support/Sunlight/Backgrounds/, beside the layouts.
     nonisolated static let folder: URL = {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        return base.appendingPathComponent("Sunlight/Backgrounds", isDirectory: true)
+        return base.appendingPathComponent(SIPRedesign.supportName, isDirectory: true).appendingPathComponent("Backgrounds", isDirectory: true)
     }()
 
     nonisolated static func imageURL(_ name: String) -> URL { folder.appendingPathComponent(name) }

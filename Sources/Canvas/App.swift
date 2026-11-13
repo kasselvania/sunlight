@@ -9,10 +9,10 @@ enum CanvasApp {
            let parent = pid_t(CommandLine.arguments[index + 1]) {
             Stability.guardMain(parent: parent)
         }
-        LegacyMigration.run()
+        if !SIPRedesign.enabled { LegacyMigration.run() }
         // A Mac already set up for live windows (SIP partly off, boot argument set) that gets this build
         // isn't a fresh install: no preview mode for it.
-        if !Settings.liveWindowsEverLoaded, SetupStatus.liveWindowsPossible() { Settings.liveWindowsEverLoaded = true }
+        if !SIPRedesign.enabled, !Settings.liveWindowsEverLoaded, SetupStatus.liveWindowsPossible() { Settings.liveWindowsEverLoaded = true }
         let args = Set(CommandLine.arguments.dropFirst())
         Settings.previewForced = args.contains("--preview-mode")
         if args.contains("--renderer-status") {
@@ -56,7 +56,7 @@ enum CanvasApp {
             reviewScenario = scenario
         }
 
-        if reviewScenario == nil {
+        if reviewScenario == nil, !SIPRedesign.enabled {
             let info = Bundle.main.infoDictionary ?? [:]
             Log.note("Startup: Sunlight \(info["CFBundleShortVersionString"] as? String ?? "dev") (\(info["CFBundleVersion"] as? String ?? "-")), pid \(getpid()), \(ProcessInfo.processInfo.operatingSystemVersionString)")
             Stability.launched()
@@ -67,7 +67,7 @@ enum CanvasApp {
         app.delegate = delegate
         // No Dock icon and no menu bar of its own: Sunlight lives in its menu bar icon (`MenuBarItem`).
         // Info.plist's LSUIElement says the same for the app bundle; this covers `swift run`.
-        app.setActivationPolicy(.accessory)
+        app.setActivationPolicy(SIPRedesign.enabled ? .regular : .accessory)
         app.run()
     }
 }
@@ -92,6 +92,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     var reviewScenario: SetupReview.Scenario?
     private var reviewController: SetupWizardController?
     private var updater: Updater?
+    private var sipStatusItem: NSStatusItem?
+    private var sipStatusTimer: Timer?
     /// The menu bar icon: with no Dock icon, every command lives there, in its panel or its right-click menu.
     private var menuBar: MenuBarItem?
     /// Tell Sunlight's bar (⌃⌥Space), made the first time it's asked for.
@@ -101,6 +103,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private let windowMenu = NSMenu(title: "Window")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        if SIPRedesign.enabled {
+            AXWindow.installGlobalTimeout(1)
+            Permissions.requestAccessibility()
+            Permissions.requestScreenCapture()
+            if Display.all.isEmpty { waitForDisplay() } else { startCanvas() }
+            return
+        }
         if let reviewScenario {
             installMenu()
             reviewController = SetupReview.run(reviewScenario)
@@ -154,6 +163,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     /// The canvas and everything around it, once there is a display to put it on.
     private func startCanvas() {
+        if SIPRedesign.enabled { startSIPCanvas(); return }
         let canvas = Desk()
         self.canvas = canvas
         canvas.onSetUp = { [weak self] in self?.setupController().show(startingLive: true) }
@@ -241,6 +251,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if SIPRedesign.enabled {
+            sipStatusTimer?.invalidate()
+            canvas?.shutdown()
+            canvas?.remember()
+            SIPRedesign.publish(["phase": "stopped", "pid": getpid(), "app_path": Bundle.main.bundlePath])
+            return .terminateNow
+        }
         canvas?.shutdown()
         canvas?.remember()
         takeover?.revertForTermination(quit: NSAppleEventManager.shared().currentAppleEvent)
@@ -248,6 +265,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         Stability.quitCleanly()
         return .terminateNow
     }
+
+    /// Initial integration uses the real Sunlight canvas, without invoking its
+    /// legacy setup, updater, takeover, migration or injected helper.
+    private func startSIPCanvas() {
+        let desk = Desk()
+        canvas = desk
+        let menu = NSMenu()
+        let appItem = NSMenuItem()
+        let commands = NSMenu(title: "Sunlight")
+        let show = commands.addItem(withTitle: "Show Canvas", action: #selector(showSIPCanvas), keyEquivalent: "")
+        show.target = self
+        let fit = commands.addItem(withTitle: "Fit All Windows", action: #selector(fitSIPCanvas), keyEquivalent: "")
+        fit.target = self
+        commands.addItem(.separator())
+        commands.addItem(withTitle: "Quit Sunlight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = commands
+        menu.addItem(appItem)
+        NSApp.mainMenu = menu
+        let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        status.button?.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: "Sunlight")
+        status.menu = commands.copy() as? NSMenu
+        sipStatusItem = status
+        desk.show()
+        sipStatusTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, let canvas = self.canvas else { return }
+                SIPRedesign.publish(["phase": "running", "pid": getpid(), "ppid": getppid(),
+                                     "app_path": Bundle.main.bundlePath,
+                                     "screen_recording": CGPreflightScreenCaptureAccess(),
+                                     "accessibility": AXIsProcessTrusted(),
+                                     "canvases": canvas.canvases.map { $0.redesignStatus }])
+            }
+        }
+    }
+
+    @objc private func showSIPCanvas() { canvas?.show() }
+    @objc private func fitSIPCanvas() { canvas?.showCanvas(fitAll: true) }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if let setup, setup.isShowing {

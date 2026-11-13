@@ -37,6 +37,14 @@ final class CanvasWindow: NSWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }
 
+/// Receives canvas pointer events without repeatedly activating Sunlight over
+/// the app being edited through a captured tile.
+final class CapturedCanvasPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
+}
+
 /// The desktop model:
 ///
 /// * The canvas is a full-screen, borderless, *normal-level* window. While our app is active it covers
@@ -60,7 +68,7 @@ final class CanvasWindow: NSWindow {
 /// leave no pill. Every stream is restarted by the first capture pass after the canvas is in front again.
 @MainActor
 final class CanvasController {
-    let window: CanvasWindow
+    let window: NSWindow
     let view: CanvasView
     /// Screen-space chrome over the canvas: the minimap.
     let overlay: OverlayView
@@ -147,6 +155,7 @@ final class CanvasController {
     private var refreshCursor = 0
     private(set) var renderer: Settings.Renderer = .capture
     private var configuringRenderer = true
+    private let capturedInput = CapturedWindowInput()
     private var rendererRevision = 0
     private let realWindows = RealWindowDriver()
     /// Brings the addition back when the Dock restarts, which unloads it.
@@ -333,7 +342,14 @@ final class CanvasController {
         view.setFloor(desktopFloor.layer)
         overlay = OverlayView(frame: view.frame)
         minimap = MinimapPanel(canvas: view)
-        window = CanvasWindow(contentRect: display.cocoaFrame, styleMask: [.borderless], backing: .buffered, defer: false)
+        if SIPRedesign.enabled {
+            let panel = CapturedCanvasPanel(contentRect: display.cocoaFrame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+            panel.hidesOnDeactivate = false
+            panel.becomesKeyOnlyIfNeeded = true
+            window = panel
+        } else {
+            window = CanvasWindow(contentRect: display.cocoaFrame, styleMask: [.borderless], backing: .buffered, defer: false)
+        }
         // The canvas view hosts its own layers, so the overlay sits next to it, not in it: a plain
         // container holds the two, the overlay on top.
         let container = NSView(frame: view.frame)
@@ -347,7 +363,7 @@ final class CanvasController {
         window.isOpaque = false          // keeps the windows beneath from being reported as occluded
         window.backgroundColor = .clear
         window.hasShadow = false
-        window.level = .normal           // the whole trick: an activated app's window rises above us
+        window.level = SIPRedesign.enabled ? .floating : .normal
         window.isMovable = false
         window.collectionBehavior = [.stationary, .ignoresCycle, .fullScreenAuxiliary]
         window.isReleasedWhenClosed = false
@@ -361,7 +377,29 @@ final class CanvasController {
         view.onFloorOpen = { [weak self] icon in self?.openFiles([icon]) }
         view.floorMenu = { [weak self] icon in self?.floorMenu(for: icon) }
         view.onFloorCommand = { [weak self] command in self?.floorCommand(command) }
-        view.holdsKey = { [weak self] event in self?.holdKey(event) ?? false }
+        view.holdsKey = { [weak self] event in
+            guard let self else { return false }
+            return (SIPRedesign.enabled && self.capturedInput.key(event)) || self.holdKey(event)
+        }
+        view.onCapturedInput = { [weak self] proxy, event, world in
+            self?.wantsFrontUntil = 0
+            // A nonactivating panel can hold key focus even while the source
+            // app is frontmost. Release it before asking that app to edit.
+            self?.window.resignKey()
+            self?.capturedInput.pointer(event, to: proxy, world: world)
+        }
+        view.onCapturedInputCleared = { [weak self] in self?.capturedInput.clear() }
+        capturedInput.onFailure = { [weak self] message in
+            guard let self else { return }
+            Log.note("Captured input: \(message)")
+            CanvasToast.show(message, in: self.overlay)
+        }
+        capturedInput.worldAtScreenPoint = { [weak self] point in
+            guard let self else { return point }
+            return self.view.camera.toWorld(CGPoint(x: point.x - self.display.frame.minX,
+                                                   y: point.y - self.display.frame.minY))
+        }
+        capturedInput.onPointerReleased = { [weak self] in self?.view.releaseCapturedPress() }
         view.onSpring = { [weak self] proxy, point in self?.springInto(proxy, around: point) }
         view.onFileDragEnded = { [weak self] in self?.fileDragEnded() }
         view.onEnter = { [weak self] proxy, point in self?.handoff(to: proxy, placement: .inPlace(around: point)) }
@@ -465,7 +503,10 @@ final class CanvasController {
         placeMinimap()
         updateMinimap(animated: false)
         view.isCovered = { [weak overlay] in overlay?.covers($0) ?? false }
-        view.isUsingScaledWindow = { [weak self] in self?.usingScaledWindow ?? false }
+        view.isUsingScaledWindow = { [weak self] in
+            guard let self else { return false }
+            return self.usingScaledWindow || (SIPRedesign.enabled && self.capturedInput.windowID != nil)
+        }
         view.onCameraChanged = { [weak self] in self?.cameraChanged() }
         // The ⌘Tab strip may be on another display's canvas than the flight it follows.
         view.onFlightProgress = { [weak self] t in
@@ -611,11 +652,23 @@ final class CanvasController {
 
     // MARK: Rendering mode
 
+    var redesignStatus: [String: Any] {
+        ["window_id": window.windowNumber, "display_id": display.id,
+         "camera": ["x": view.camera.origin.x, "y": view.camera.origin.y, "zoom": view.camera.zoom],
+         "requested_fps": SIPRedesign.frameRate(displayID: display.id),
+         "input_target": capturedInput.windowID ?? 0, "input_events_posted": capturedInput.eventsPosted,
+         "windows": view.proxies.filter { $0.kind == .window }.map {
+             ["id": $0.windowID, "pid": $0.pid, "world": NSStringFromRect($0.worldRect),
+              "screen": NSStringFromRect(view.camera.toScreen($0.worldRect)),
+              "streaming": $0.isStreaming, "has_frame": $0.hasFrame] as [String: Any]
+         }]
+    }
+
     func configureRenderer(_ asked: Settings.Renderer) {
         // Live windows on another display's canvas need an add-on that holds a lease per canvas; with an
         // older one the lead has the add-on and the others show captured pictures.
         // Safe mode (`Stability`): pictures only, this launch, with nothing scheduled to try live windows again.
-        let requested = Stability.safeMode || asked == .realWindows && !isLead
+        let requested = SIPRedesign.enabled || Stability.safeMode || asked == .realWindows && !isLead
             && (desk?.lead.additionNumber ?? 0) < LiveWindowsWire.leasePerCanvas ? Settings.Renderer.capture : asked
         rendererRevision += 1
         let revision = rendererRevision
@@ -774,6 +827,7 @@ final class CanvasController {
     /// `interactive` goes straight to the prompt, for the menu item.
     /// `asked` is false only for the prompt Sunlight brings up by itself after a quiet try needed a password.
     func reloadAddition(interactive: Bool = false, asked: Bool = true, failure: ((String) -> Void)? = nil) {
+        guard !SIPRedesign.enabled else { return }
         guard Settings.renderer == .realWindows, !reloading, interactive || reloader.mayTryQuietly else { return }
         // Not by itself in preview mode, nor on a Mac that can't load the add-on yet (SIP on, or no boot
         // argument): the load would fail and only leave an administrator prompt or a Login Items request
@@ -1308,6 +1362,7 @@ final class CanvasController {
     }
 
     private func showNow() {
+        if SIPRedesign.enabled { capturedInput.clear(); window.level = .floating }
         springDrag = false
         window.ignoresMouseEvents = false
         NSApp.activate()
@@ -2045,6 +2100,7 @@ final class CanvasController {
 
     /// Quitting.
     func shutdown() {
+        capturedInput.shutdown()
         // Windows their apps closed that the canvas moved off the screen go back where they were, so the
         // app shows them there when it reopens them. One still on screen (kept ordered in) stays put:
         // back where it was, it would show, closed, over the desktop.
@@ -5436,6 +5492,7 @@ final class CanvasController {
     /// The moment a real window is in front of the canvas, pixel-matched to its proxy. Shared by the
     /// canvas-initiated handoff (which activates the app) and takeover's absorb (the app is already active).
     private func enter(_ p: WindowProxy, realFrame: CGRect, activateApp: Bool) {
+        if SIPRedesign.enabled { capturedInput.clear(); window.level = .normal }
         clearLaunches()   // the user chose a window; a launch still in flight is then absorbed as before
         activeProxy = p
         lastActiveProxy = p
@@ -5698,7 +5755,7 @@ final class CanvasController {
     /// None at all without screen capture mode or preview mode (`Settings.capturesStream`): the capture
     /// renderer is then only the stand-in while live windows come back, and every window and widget is a
     /// still.
-    static var maxStreams: Int { Settings.capturesStream ? 8 : 0 }
+    static var maxStreams: Int { SIPRedesign.enabled ? Int.max : Settings.capturesStream ? 8 : 0 }
     /// A streaming window keeps its stream against a newcomer until the newcomer is this much larger on
     /// screen, so a pan doesn't stop and start streams back and forth.
     static let streamHysteresis: CGFloat = 1.5
@@ -5776,12 +5833,13 @@ final class CanvasController {
         if let p = activeProxy { frontPIDs.insert(p.pid) }
         if let p = handoffTarget { frontPIDs.insert(p.pid) }
         if pendingAbsorbPID != 0 { frontPIDs.insert(pendingAbsorbPID) }
-        if !NSApp.isActive, let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, front != myPID {
+        if !NSApp.isActive, !(SIPRedesign.enabled && activeProxy == nil),
+           let front = NSWorkspace.shared.frontmostApplication?.processIdentifier, front != myPID {
             frontPIDs.insert(front)
         }
         // Streams start only with the canvas in front (a previously entered app's windows stay above
         // it when another app takes over); widgets are below every window, so theirs always can.
-        let canStart = NSApp.isActive && activeProxy == nil && !asleep
+        let canStart = (NSApp.isActive || SIPRedesign.enabled && isUp) && activeProxy == nil && !asleep
 
         let size = view.bounds.size
         let enterRect = CGRect(origin: .zero, size: size).insetBy(dx: -size.width * 0.25, dy: -size.height * 0.25)
@@ -5844,7 +5902,8 @@ final class CanvasController {
                 continue
             }
             let k = min(lod.applied, p.maxCaptureLevel)
-            var level = WindowCapture.Level(factor: CanvasController.factor(forLevel: k), fps: CanvasController.fps(forLevel: k))
+            var level = WindowCapture.Level(factor: CanvasController.factor(forLevel: k),
+                                           fps: SIPRedesign.enabled ? SIPRedesign.frameRate(displayID: display.id) : CanvasController.fps(forLevel: k))
             var stop = asleep
             var isFar = false
             if case .far(let since) = p.viewport {
@@ -7563,7 +7622,7 @@ final class CanvasController {
 
     /// Up in front of its display: Sunlight is the active app, or a window is entered on another display,
     /// whose canvas stands in for it on this one (listing, live windows) until Sunlight is back.
-    private var isUp: Bool { NSApp.isActive || staysUp }
+    private var isUp: Bool { NSApp.isActive || staysUp || (SIPRedesign.enabled && capturedInput.windowID != nil) }
 
     /// A window is entered from another display's canvas, or a window is being used where it is drawn
     /// on this one (`usingScaledWindow`).

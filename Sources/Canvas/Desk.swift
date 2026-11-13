@@ -108,7 +108,7 @@ final class Desk {
 
     var background: BackgroundModel { lead.background }
     /// For sheets and alerts.
-    var window: CanvasWindow { lead.window }
+    var window: NSWindow { lead.window }
 
     // MARK: Where a command goes
 

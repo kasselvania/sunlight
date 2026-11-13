@@ -17,7 +17,7 @@ import os
 /// Each line is written to the file before `note` returns (one `write` on a descriptor opened with
 /// O_APPEND), so the lines before a crash are on disk when it comes. Any thread.
 enum Log {
-    nonisolated static let folder = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Logs/Sunlight", isDirectory: true)
+    nonisolated static let folder = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Logs/\(SIPRedesign.supportName)", isDirectory: true)
     nonisolated static var fileURL: URL { folder.appendingPathComponent("Sunlight.log") }
     nonisolated static var previousURL: URL { folder.appendingPathComponent("Sunlight.1.log") }
     nonisolated static let maxBytes = 2_000_000

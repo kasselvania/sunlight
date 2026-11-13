@@ -66,6 +66,63 @@ Desktop all land on it. So it's still your Mac. It just has room now.
 - 🧪 **Experimental**, off until you flip them in Settings › Experimental: Arrange and Tidy,
   strip mode (every app on one endless strip), and a canvas on every display.
 
+## SIP-enabled redesign standards — this branch
+
+The objective is the complete Sunlight experience with **every SIP protection enabled**.
+Keep Sunlight's existing implementation wherever it supplies the required behavior. Replace the Dock
+add-on's privileged operations with direct ports, equivalent behavior or equally usable engineering
+alternatives. A working renderer experiment is evidence for one component, not product completion.
+
+| Product area | Required standard | Implementation direction |
+|---|---|---|
+| Security and startup | No SIP changes, boot arguments, Dock injection or privileged loader. A stable signed app opens normally and keeps its privacy identity. | Explicit SIP-enabled launch profile; omit the injected helper from its bundle. |
+| Canvas navigation | Preserve the existing camera, inertia, easing, snapping and gestures. Rendering follows the display cadence independently of source capture. | Reuse `CanvasView`, `Camera`, `Motion` and the display link. |
+| Live windows | All visible app windows remain live and sharp at their displayed size. The demo's eight-stream and 30/15/10 fps limits are not the redesign's quality standard. | Existing captured-window backend first; integrate the demonstrated virtual-display feed where it improves liveness and cost. |
+| App interaction | Click, type, select, scroll and drag through a window at its current canvas zoom. Input reaches the intended real app/window without changing the camera merely to make input possible. | Explicit coordinate/focus bridge; retain existing window controls and canvas gestures. |
+| Focus and handoff | Preserve click/focus, zoom-to-window, return-to-canvas and native-window access. No flashes of unrelated windows. | Reuse existing navigation; replace privileged native transactions with covered transitions where needed. |
+| Window management | Preserve move, resize, close, minimize, hide, stacking, groups, snapping, pushing, Arrange, Tidy and strip mode. | Existing model and Accessibility operations; compose visible order in Sunlight. |
+| Layouts and recovery | Preserve saved layouts, app/document reopening and hidden/minimized window positions. Quit and recovery release owned resources and do not strand windows. | Reuse persistence and recovery; keep redesign development data separate from installed Sunlight. |
+| Desktop integration | Preserve Finder files, widgets, Show Desktop, shortcuts and application switching. | Port existing behavior and replace only the privileged dependencies. |
+| Picture in Picture and appearance | Preserve live pinned tiles, tucking, return, backgrounds, shadows, opacity and rounded corners. | Own captured tiles/panels and existing effects code. |
+| Displays and Spaces | Preserve per-display canvas behavior and the final Desktop consolidation result, leaving full-screen app Spaces alone. | Normal Mission Control Accessibility actions underneath a covering animation. |
+| Spaces transition concession | Desktop consolidation may take longer underneath a smooth, reactive cover. Completion follows real OS state. This concession applies at startup/reorganization, not to everyday interaction or frame rate. | A stationary covering window; no timer-only claim that OS work finished. |
+| Performance | Match the connected display's cadence where content supports it; the current local target is 100 Hz. Measure delivered frames and input feedback at useful resolutions. | Reuse display-linked rendering and newest-frame delivery. Prior latency budgets were estimates, not measured acceptance. |
+
+The first implementation slice is interaction with real applications through Sunlight's existing
+captured tiles. The virtual-display lab remains a renderer proof. Spaces automation and its cover,
+complete window-family handling, native input compatibility and sustained performance remain required
+work until actually demonstrated. Development launches do not consolidate the user's Desktops.
+
+### First implementation slice
+
+`scripts/build-sip-redesign.sh` builds the original Swift Sunlight target in a separate launch
+profile. It forces captured windows, retains the existing camera and controls, removes the demo
+stream-count and frame-rate policies, and adds window-addressed input through scaled tiles.
+The source app receives focus while a nonactivating canvas panel stays above its native window.
+An input tap owns a captured left-button gesture until release. Canvas chrome and modifier gestures
+continue through the existing handlers.
+
+The bridge uses Accessibility, PID event posting, private event addressing (`CGEventSetWindowLocation`
+and the window-number field), and no injected code. That private API is an OS-compatibility dependency;
+its availability and a successful TextEdit interaction do not establish compatibility with every app.
+Context menus, child windows, native drag and drop, IME and apps that poll the global pointer still
+need implementation or qualification. The virtual-display bank and covered Spaces consolidation
+are not integrated yet. The initial profile has Show Canvas, Fit All Windows and Quit commands;
+the rest of Sunlight's application integration remains to be ported.
+
+Build and install using the existing development identity so the app keeps its privacy identity:
+
+```sh
+SIGN='your existing development signing identity' scripts/build-sip-redesign.sh --install
+open "$HOME/Applications/Sunlight Canvas Lab.app"
+```
+
+The canonical bundle ID is `com.kasselvania.sunlight.virtualcanvas`. Build staging uses `.bundle`
+directories so macOS does not register competing launchable copies. This profile keeps its layouts,
+backgrounds and logs separate from installed Sunlight. Its diagnostic session file is
+`~/Library/Application Support/Sunlight SIP Redesign/redesign-session.json`; requested fps and posted
+input counts in that file are not delivered-frame or successful-interaction measurements.
+
 ## Getting around
 
 <p align="center">

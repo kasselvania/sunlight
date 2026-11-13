@@ -106,3 +106,41 @@ passing cleanup. That remains command-line evidence, separate from the installed
 normal-launch result above. The failed native-mirror experiment is retained under
 `experiments/native-mirrors`; foreign-process CAPluginLayer mirroring did not
 work on this Mac.
+
+## Redesign implementation after the renderer proof
+
+The redesign now starts in Sunlight's original Swift canvas, rather than adding
+input to the synthetic Objective-C fixture. The full product requirements and
+replacement directions are in the root README. The new launch profile bypasses
+legacy setup, migration, injection, takeover and updating. Its bundle omits the
+privileged loader and launch daemon. Development data is isolated from Sunlight.
+
+The initial bridge maps a scaled tile's pointer back to its real window, obtains
+focus with Accessibility and app activation, and posts addressed input to that
+app. It uses private `CGEventSetWindowLocation` and the AppKit window-number
+field, informed by the primary [TouchBridge implementation](https://github.com/theofanisv/touch-bridge/blob/main/Sources/TouchPlatform/DirectTarget.swift).
+This is an OS-compatibility dependency, not a SIP exception. A nonactivating
+canvas panel remains above the source, and Sunlight's existing input thread
+owns the left-button drag until release. Native global-pointer polling and
+other input families are not established by this implementation.
+
+Development-route checks used a disposable TextEdit document at about 80% zoom.
+Different content clicks changed the native selection range, typing inserted at
+the clicked location, a horizontal drag selected 16 characters, and scrolling
+changed the real scrollbar while the canvas camera stayed fixed. These were
+observed through TextEdit's Accessibility state, rather than inferred from
+posted-event counts. The build and 19 focused coordinate, camera and handoff
+checks passed. No throughput or input-latency measurement is claimed.
+
+During development, named window-under-pointer fields alone failed to address
+AppKit mouse input. The bridge now supplies the window number and relative
+location. The nonactivating panel also needs to release key focus, and the
+existing capture view rejected first clicks while another app was active;
+the redesign now accepts them. A preparation helper initially omitted a move
+before its generated drag, invalidating early comparisons. A native baseline
+exposed that helper defect. An unchanged nonempty selection was also insufficient
+evidence of a delivered click; subsequent checks deliberately changed the
+caret location and verified insertion there.
+
+The normal-launch result for the older renderer above does not qualify the
+new Swift build. Its signed installed launch must be verified separately.

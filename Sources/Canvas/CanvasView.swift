@@ -43,6 +43,11 @@ final class CanvasView: NSView {
     /// A press on a window at 1:1: enter it where it is and pass the press on to the real window, so it's
     /// used straight away, as on the desktop. `press` is the mouse-down.
     var onUse: ((_ proxy: WindowProxy, _ around: CGPoint, _ press: NSEvent) -> Void)?
+    var onCapturedInput: ((WindowProxy, NSEvent, CGPoint) -> Void)?
+    var onCapturedInputCleared: (() -> Void)?
+    private var capturedPress: WindowProxy?
+    private var capturedScroll: WindowProxy?
+    func releaseCapturedPress() { capturedPress = nil }
     /// The rest of a press `onUse` passed on that still came to the canvas: drags and the release.
     var onUseFollow: ((NSEvent) -> Void)?
     /// A scroll starting over a window at 1:1: enter it where it is and pass the scroll on, as on the desktop.
@@ -1270,6 +1275,7 @@ final class CanvasView: NSView {
     /// At 1:1 a press on a window behind the one in use is that window's, as on the desktop: it comes
     /// through on the click that brings the canvas forward instead of needing a second one.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        if SIPRedesign.enabled { return true }
         // Using windows at any zoom, another app is in front while Sunlight still shows the canvas: a
         // drag on a window's title strip (or anywhere with ⌘ ⌥) moves it on the first press.
         if let event, Settings.useScaledWindows, showsRealWindows, !isOneToOne, isCovered?(topLeftPoint(event)) != true,
@@ -2275,6 +2281,15 @@ final class CanvasView: NSView {
     /// it: live windows, not at 1:1 (the press there is passed on already, `onUse`), nothing moving, no
     /// ⌥ ⌘ ⌃ held (they pan and zoom over windows), off the title strip, the edges, its controls and
     /// whatever covers the canvas. Asked on every move while the pointer is through, too.
+    private func capturedInputTarget(at point: CGPoint) -> WindowProxy? {
+        guard SIPRedesign.enabled, !showsRealWindows, isCovered?(point) != true,
+              let proxy = proxy(at: camera.toWorld(point)), proxy.kind == .window,
+              proxy.drawnPip == nil, proxy.control(at: camera.toWorld(point)) == nil,
+              resizeEdges(of: proxy, at: point).isEmpty,
+              camera.toWorld(point).y - proxy.worldRect.minY >= Self.passThroughTitleStrip else { return nil }
+        return proxy
+    }
+
     func passThroughTarget() -> WindowProxy? {
         guard Settings.useScaledWindows, showsRealWindows, !isOneToOne, !isBusy, !panning, coast == nil,
               zoomCoast == nil, floorPress == nil, !showsDesktop, NSEvent.pressedMouseButtons == 0,
@@ -2537,6 +2552,14 @@ final class CanvasView: NSView {
         let worldPoint = camera.toWorld(screenPoint)
         passingOn = false
         cancelAnimation()
+        if let target = capturedInputTarget(at: screenPoint),
+           event.modifierFlags.intersection([.command, .option, .control]).isEmpty {
+            capturedPress = target
+            dragging = nil
+            onCapturedInput?(target, event, worldPoint)
+            return
+        }
+        onCapturedInputCleared?()
         settleMagnet(now: true)   // the last drag's pushed windows go straight to their places
         floorPress = nil
         // The second click of a double-click, the first one's way in just stopped above: the same window,
@@ -2649,6 +2672,10 @@ final class CanvasView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         if CanvasView.isPassedOn(event) { return }
+        if let target = capturedPress {
+            onCapturedInput?(target, event, camera.toWorld(topLeftPoint(event)))
+            return
+        }
         if passingOn {
             onUseFollow?(event)
             return
@@ -2702,6 +2729,11 @@ final class CanvasView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         if CanvasView.isPassedOn(event) { return }
+        if let target = capturedPress {
+            capturedPress = nil
+            onCapturedInput?(target, event, camera.toWorld(topLeftPoint(event)))
+            return
+        }
         if passingOn {
             passingOn = false
             onUseFollow?(event)
@@ -2914,6 +2946,18 @@ final class CanvasView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         if CanvasView.isPassedOn(event) { return }
+        if SIPRedesign.enabled {
+            let starts = event.phase == .began || (event.phase.isEmpty && event.momentumPhase.isEmpty)
+            if starts {
+                capturedScroll = event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+                    ? capturedInputTarget(at: topLeftPoint(event)) : nil
+            }
+            if let target = capturedScroll {
+                onCapturedInput?(target, event, camera.toWorld(topLeftPoint(event)))
+                if event.phase == .cancelled || event.momentumPhase == .ended { capturedScroll = nil }
+                return
+            }
+        }
         let inFront = cameraIsFree
         // A new scroll with the canvas in front is the canvas's to place: a trackpad's starts with `began`,
         // a mouse wheel's clicks have no phase at all.
@@ -3081,6 +3125,11 @@ final class CanvasView: NSView {
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         if holdsKey?(event) == true { return true }
         return super.performKeyEquivalent(with: event)
+    }
+
+    override func flagsChanged(with event: NSEvent) {
+        if holdsKey?(event) == true { return }
+        super.flagsChanged(with: event)
     }
 
     override func keyUp(with event: NSEvent) {

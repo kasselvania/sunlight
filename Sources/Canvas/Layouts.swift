@@ -189,7 +189,7 @@ extension Layout.Entry.Kind {
 @MainActor
 enum LayoutStore {
     private static let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appendingPathComponent("Sunlight", isDirectory: true)
+        .appendingPathComponent(SIPRedesign.supportName, isDirectory: true)
     private static let rememberedURL = folder.appendingPathComponent("Canvas.json")
     private static let layoutsURL = folder.appendingPathComponent("Layouts.json")
     private static var lastRemembered: Layout?
