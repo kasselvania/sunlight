@@ -316,6 +316,24 @@ and the icon's right-click menu carry Start Window Bank and Return Windows and S
 Unchanged from the earlier SIP builds: the app keeps a Dock icon (`.regular` activation policy),
 where Sunlight proper has none.
 
+## Step 5a status: corners (run live 2026-11-13)
+
+A shared display feed has no alpha, so a rectangular crop showed the bank's wallpaper in each
+window's rounded corners. Bank frames now go to their own clipped layer in `WindowProxy`
+(`bankContent`; the proxy's own layer can't clip without clipping its shadow), with the window's
+real corner radius. `SourceBank.measureCorners` takes one SkyLight capture of the window, reads its
+alpha (`SourceBankGeometry.alpha(of:)`), and measures the radius from the opaque area's corner along
+the diagonal (`cornerRadius(alpha:width:height:windowWidth:)`, unit-tested with and without a
+shadow margin). It measures when a window is parked, when its tile is made again, and when a new
+size settles. The tile's shadow and hover border take the same radius; Picture in Picture keeps its
+own corner shape and the bank layer follows it. The last bank frame stays up until another source's
+first frame replaces it, so a handoff's flight never shows an empty tile.
+
+Live, all eight windows banked: standard windows measured **17.1 pt**, toolbar windows (Mail,
+Messages) **27.3 pt**, as macOS 26 draws them. Screenshots of tile corners show the window's own
+corner with no bank wallpaper. The measurement's step is about 1.7 pt (one pixel on the diagonal at
+2×). True per-pixel alpha (translucent windows, irregular shapes) is still not recovered.
+
 ## Not verified by this map
 
 - Runtime behaviour of any row. This map comes from source reading only.

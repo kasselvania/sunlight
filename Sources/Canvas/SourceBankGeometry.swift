@@ -88,6 +88,55 @@ enum SourceBankGeometry {
         return union.insetBy(dx: -feedHeadroom, dy: -feedHeadroom).intersection(display).integral
     }
 
+    /// A window's corner radius, in pixels, from the alpha channel of a one-shot capture (row-major,
+    /// one byte per pixel). A shared display feed has no alpha, so whatever sits behind a window on
+    /// its bank shows in its corners; the tile is clipped to this radius instead. Measured from the
+    /// corner of the opaque area, so a capture framed with a shadow margin measures the same: along
+    /// the diagonal, a circular corner of radius r is first opaque at r·(1 − 1/√2) on each axis.
+    /// The smaller of the top-left and bottom-left corners, so content is never clipped where one is
+    /// square. Nil when the image has no opaque area.
+    static func cornerRadius(alpha: [UInt8], width: Int, height: Int, opaque: UInt8 = 230) -> CGFloat? {
+        corner(alpha: alpha, width: width, height: height, opaque: opaque)?.radius
+    }
+
+    /// The same, in points, for a window `points` wide: the capture's own scale (and any margin it
+    /// was framed with) drops out against the opaque area's width.
+    static func cornerRadius(alpha: [UInt8], width: Int, height: Int, windowWidth points: CGFloat) -> CGFloat? {
+        guard let c = corner(alpha: alpha, width: width, height: height), c.opaqueWidth > 0 else { return nil }
+        return c.radius * points / CGFloat(c.opaqueWidth)
+    }
+
+    private static func corner(alpha: [UInt8], width: Int, height: Int, opaque: UInt8 = 230) -> (radius: CGFloat, opaqueWidth: Int)? {
+        guard width > 2, height > 2, alpha.count >= width * height else { return nil }
+        // The opaque area's bounds: its middle row and column, where no corner reaches.
+        let midY = height / 2, midX = width / 2
+        guard let left = (0..<width).first(where: { alpha[midY * width + $0] >= opaque }),
+              let right = (0..<width).last(where: { alpha[midY * width + $0] >= opaque }),
+              let top = (0..<height).first(where: { alpha[$0 * width + midX] >= opaque }),
+              let bottom = (0..<height).last(where: { alpha[$0 * width + midX] >= opaque }),
+              right > left, bottom > top else { return nil }
+        let reach = min(right - left, bottom - top) / 2
+        func diagonal(_ x0: Int, _ y0: Int, _ dy: Int) -> Int? {
+            (0..<reach).first { i in alpha[(y0 + dy * i) * width + x0 + i] >= opaque }
+        }
+        guard let topLeft = diagonal(left, top, 1), let bottomLeft = diagonal(left, bottom, -1) else { return nil }
+        return (CGFloat(min(topLeft, bottomLeft)) / (1 - 1 / 2.0.squareRoot()), right - left + 1)
+    }
+
+    /// An image's alpha channel, one byte per pixel, row-major from the top.
+    static func alpha(of image: CGImage) -> [UInt8]? {
+        let w = image.width, h = image.height
+        guard w > 0, h > 0 else { return nil }
+        var bytes = [UInt8](repeating: 0, count: w * h)
+        let drawn = bytes.withUnsafeMutableBytes { buffer -> Bool in
+            guard let context = CGContext(data: buffer.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w,
+                                          space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.alphaOnly.rawValue) else { return false }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            return true
+        }
+        return drawn ? bytes : nil
+    }
+
     static func crop(window: CGRect, source: CGRect) -> CGRect {
         CGRect(x: (window.minX - source.minX) / source.width,
                y: 1 - (window.maxY - source.minY) / source.height,

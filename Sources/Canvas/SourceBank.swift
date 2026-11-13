@@ -26,6 +26,8 @@ final class SourceBank {
     private var banks: [CGDirectDisplayID: (bounds: CGRect, scale: CGFloat)] = [:]
     private var placing = Set<CGWindowID>()
     private var skipped: [CGWindowID: String] = [:]
+    /// The size each window's corners were last measured at (`measureCorners`).
+    private var cornersMeasured: [CGWindowID: CGSize] = [:]
     /// When each banked window last moved or resized natively: of two that overlap, the one that
     /// changed last is the one that ran into the other, and it alone is re-slotted.
     private var changedAt: [CGWindowID: CFTimeInterval] = [:]
@@ -133,6 +135,7 @@ final class SourceBank {
             p.owner = .canvas
             p.placedNatively(at: entry.record.native)
             p.beginBankCapture()
+            cornersMeasured[p.windowID] = nil   // a new tile: measured for it
         }
         for p in proxies where p.kind == .window && !protects(p.windowID) && (scope?.contains(p.windowID) ?? true) {
             // Why a window stays out of the bank, for the status file.
@@ -163,6 +166,7 @@ final class SourceBank {
                     p.owner = .canvas
                     p.placedNatively(at: record.native)
                     p.beginBankCapture()
+                    self.measureCorners(p.windowID)
                     self.scheduleCapture()
                 }
                 self.onChange?()
@@ -187,6 +191,7 @@ final class SourceBank {
         if let text = reply["error"] as? String { native.remove(p.windowID); fail(text); return false }
         entries[p.windowID] = nil
         changedAt[p.windowID] = nil
+        cornersMeasured[p.windowID] = nil
         p.endBankCapture()
         if let frame = reply["restored"] as? String, !frame.isEmpty { p.placedNatively(at: NSRectFromString(frame)) }
         scheduleCapture(); onChange?()
@@ -249,6 +254,26 @@ final class SourceBank {
         }
         // Not under the pointer: a window dragged off its bank goes back once it's let go.
         if !reslot.isEmpty { self.reslot(reslot) }
+        // A settled new size: its corners again (an app may change its window style with its size).
+        for id in ids where now - (changedAt[id] ?? 0) >= SourceBank.settle {
+            if let size = entries[id]?.record.native.size, cornersMeasured[id] != size { measureCorners(id) }
+        }
+    }
+
+    /// The window's corner radius from one SkyLight capture's alpha, for its tile's clip and shadow.
+    /// Once per size; a window whose capture fails keeps the canvas's standard radius.
+    private func measureCorners(_ id: CGWindowID) {
+        guard let entry = entries[id], let p = entry.proxy else { return }
+        let size = entry.record.native.size
+        cornersMeasured[id] = size
+        OneShotCapture.capture(windowID: id, backing: true) { [weak self, weak p] image in
+            guard let self, let p, let image, self.entries[id]?.proxy === p,
+                  let alpha = SourceBankGeometry.alpha(of: image),
+                  let radius = SourceBankGeometry.cornerRadius(alpha: alpha, width: image.width, height: image.height,
+                                                               windowWidth: size.width) else { return }
+            Log.note("Window bank: \(p.appName) — \(p.title) corners \(String(format: "%.1f", radius)) pt")
+            p.setMeasuredCornerRadius(min(radius, min(size.width, size.height) / 2))
+        }
     }
 
     /// The record takes the window's live frame, so its crop is cut from where

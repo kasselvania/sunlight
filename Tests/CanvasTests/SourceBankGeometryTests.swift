@@ -70,6 +70,35 @@ final class SourceBankGeometryTests: XCTestCase {
         XCTAssertTrue(SourceBankGeometry.feedSource(windows: [], display: display).isNull)
     }
 
+    /// A rounded rectangle's alpha, `margin` transparent pixels round it (a shadow margin).
+    private func roundedAlpha(width: Int, height: Int, radius: Double, margin: Int) -> [UInt8] {
+        var a = [UInt8](repeating: 0, count: width * height)
+        let x0 = Double(margin), y0 = Double(margin), x1 = Double(width - margin), y1 = Double(height - margin)
+        for y in 0..<height {
+            for x in 0..<width {
+                let px = Double(x) + 0.5, py = Double(y) + 0.5
+                guard px >= x0, px <= x1, py >= y0, py <= y1 else { continue }
+                let cx = min(max(px, x0 + radius), x1 - radius), cy = min(max(py, y0 + radius), y1 - radius)
+                if (px - cx) * (px - cx) + (py - cy) * (py - cy) <= radius * radius { a[y * width + x] = 255 }
+            }
+        }
+        return a
+    }
+
+    func testCornerRadiusIsMeasuredFromTheOpaqueAreaWhateverTheMargin() {
+        for (radius, margin) in [(32.0, 0), (32.0, 40), (52.0, 12)] {
+            let a = roundedAlpha(width: 400, height: 300, radius: radius, margin: margin)
+            let measured = SourceBankGeometry.cornerRadius(alpha: a, width: 400, height: 300)!
+            XCTAssertEqual(Double(measured), radius, accuracy: 3.5, "radius \(radius), margin \(margin)")
+        }
+    }
+
+    func testSquareCornersMeasureNearZeroAndAnEmptyImageNothing() {
+        let a = roundedAlpha(width: 200, height: 100, radius: 0, margin: 5)
+        XCTAssertLessThan(SourceBankGeometry.cornerRadius(alpha: a, width: 200, height: 100)!, 1.5)
+        XCTAssertNil(SourceBankGeometry.cornerRadius(alpha: [UInt8](repeating: 0, count: 200 * 100), width: 200, height: 100))
+    }
+
     func testProcessIdentityDoesNotTreatAnAbsentProcessAsItsFormerOwner() {
         XCTAssertTrue(BankProcess(getpid())!.isLive)
         XCTAssertNil(BankProcess(Int32.max))

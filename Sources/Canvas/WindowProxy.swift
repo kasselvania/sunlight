@@ -154,7 +154,7 @@ final class WindowProxy {
     /// How far the content sits inside the captured window: zero for a window, the transparent margin
     /// around a widget's card. The texture is cropped by it, so the proxy is exactly the card.
     private(set) var inset: CGFloat
-    private let cornerRadius: CGFloat
+    private var cornerRadius: CGFloat
 
     let layer = CALayer()
     /// The window's name, rendered once into a bitmap (`renderLabel`) and shown by this layer, which a
@@ -650,15 +650,57 @@ final class WindowProxy {
     }
 
     func beginBankCapture() { stopCapture(); bankCapture = true }
+    /// The last bank frame stays up until another source's first frame replaces it (`show`), so a
+    /// window leaving the bank (a handoff's flight) never shows an empty tile.
     func endBankCapture() { bankCapture = false }
+
+    /// Bank frames go to their own layer, clipped to the window's corners: a shared display feed has no
+    /// alpha, so whatever is behind the window on its bank fills the corners of a rectangular crop.
+    /// The proxy's layer can't clip itself without clipping its shadow.
+    private var bankContent: CALayer?
+
+    private func bankContentLayer() -> CALayer {
+        if let bankContent { return bankContent }
+        let content = CALayer()
+        content.anchorPoint = .zero
+        content.frame = layer.bounds
+        content.contentsGravity = .resize
+        content.contentsScale = scale
+        content.magnificationFilter = .linear
+        content.minificationFilter = .linear
+        content.masksToBounds = true
+        content.cornerRadius = cornerRadius
+        content.cornerCurve = .continuous
+        content.actions = ["contents": NSNull(), "contentsRect": NSNull(), "bounds": NSNull(), "position": NSNull(),
+                           "cornerRadius": NSNull()]
+        layer.insertSublayer(content, at: 0)
+        bankContent = content
+        return content
+    }
+
+    /// The window's own corner radius, measured from a one-shot capture's alpha (`SourceBank`): the tile,
+    /// its shadow and its hover border take it.
+    func setMeasuredCornerRadius(_ radius: CGFloat) {
+        guard kind == .window, radius.isFinite, radius >= 0, abs(radius - cornerRadius) > 0.25 else { return }
+        cornerRadius = radius
+        bankContent?.cornerRadius = radius
+        shadowSize = .zero   // the shadow path is rebuilt with the new corners
+        layoutGeometry()
+        applyEffect()
+    }
 
     // SIP PERFORMANCE: shared-buffer layer application and lifetime entry point.
     // See docs/sip-redesign-performance.md; retain currentBuffer while displayed.
     func applyBankFrame(_ buffer: CVPixelBuffer, crop: CGRect) {
         guard bankCapture, let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return }
-        show(surface)
-        layer.contentsRect = crop
+        let content = bankContentLayer()
+        content.contents = surface
+        content.contentsRect = crop
         currentBuffer = buffer
+        if !hasFrame {
+            hasFrame = true
+            layer.backgroundColor = nil
+        }
     }
 
     /// The stream ended on its own: the window closed, its app quit, Screen Recording was revoked, or
@@ -715,7 +757,12 @@ final class WindowProxy {
     }
 
     private func show(_ contents: Any) {
-        if !bankCapture { crop(toRealSize: lastRealFrame.size) }
+        if !bankCapture {
+            crop(toRealSize: lastRealFrame.size)
+            // Another source's frame: the bank's last one, kept through the handoff, goes.
+            bankContent?.removeFromSuperlayer()
+            bankContent = nil
+        }
         layer.contents = contents
         if !hasFrame {
             hasFrame = true
@@ -839,6 +886,7 @@ final class WindowProxy {
         let r = caRect(worldRect)
         layer.bounds = CGRect(origin: .zero, size: r.size)
         layer.position = r.origin
+        bankContent?.frame = layer.bounds
         if r.size != shadowSize {
             shadowSize = r.size
             layer.shadowPath = CGPath(roundedRect: layer.bounds,
@@ -945,6 +993,7 @@ final class WindowProxy {
         // the hover border follows them, counter-scaled through the zoom and the effect's scale.
         let onScreen = max(effectZoom, 0.001) * (f.keepsGeometry ? 1 : max(f.scale.width, 0.001))
         layer.cornerRadius = pip != nil ? PictureInPicture.Reference.cornerRadius / onScreen : cornerRadius
+        bankContent?.cornerRadius = layer.cornerRadius
     }
 
     /// The ink and the shadow the canvas wants for every label (`CanvasView.applyInk`).
