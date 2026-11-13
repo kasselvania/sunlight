@@ -9,6 +9,8 @@ enum SIPRedesign {
 
     static var supportName: String { enabled ? "Sunlight SIP Redesign" : "Sunlight" }
 
+    // SIP PERFORMANCE: requested cadence, not measured delivery. The accepted
+    // milestone and optimization map live in docs/sip-redesign-performance.md.
     @MainActor static func frameRate(displayID: CGDirectDisplayID) -> Int32 {
         let screen = NSScreen.screens.first {
             ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID

@@ -652,6 +652,8 @@ final class WindowProxy {
     func beginBankCapture() { stopCapture(); bankCapture = true }
     func endBankCapture() { bankCapture = false }
 
+    // SIP PERFORMANCE: shared-buffer layer application and lifetime entry point.
+    // See docs/sip-redesign-performance.md; retain currentBuffer while displayed.
     func applyBankFrame(_ buffer: CVPixelBuffer, crop: CGRect) {
         guard bankCapture, let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return }
         show(surface)

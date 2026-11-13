@@ -1387,6 +1387,8 @@ final class CanvasView: NSView {
         link = nil
     }
 
+    // SIP PERFORMANCE: camera/input pacing has its own display link and perf.tick.
+    // Keep it independent of source capture; see docs/sip-redesign-performance.md.
     @objc private func tick(_ link: CADisplayLink) {
         let began = CACurrentMediaTime()
         // The time this frame will be shown, not the time the callback ran: even pacing under load.

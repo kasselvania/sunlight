@@ -86,7 +86,7 @@ alternatives. A working renderer experiment is evidence for one component, not p
 | Picture in Picture and appearance | Preserve live pinned tiles, tucking, return, backgrounds, shadows, opacity and rounded corners. | Own captured tiles/panels and existing effects code. |
 | Displays and Spaces | Preserve per-display canvas behavior and the final Desktop consolidation result, leaving full-screen app Spaces alone. | Normal Mission Control Accessibility actions underneath a covering animation. |
 | Spaces transition concession | Desktop consolidation may take longer underneath a smooth, reactive cover. Completion follows real OS state. This concession applies at startup/reorganization, not to everyday interaction or frame rate. | A stationary covering window; no timer-only claim that OS work finished. |
-| Performance | Match the connected display's cadence where content supports it; the current local target is 100 Hz. Measure delivered frames and input feedback at useful resolutions. | Reuse display-linked rendering and newest-frame delivery. Prior latency budgets were estimates, not measured acceptance. |
+| Performance | Match the connected display's cadence where content supports it. Build 8's observed near-100 fps performance is accepted for the current stage; sustained 100 fps remains an optimization target. | Reuse display-linked rendering and newest-frame delivery. See the [performance map](docs/sip-redesign-performance.md) for evidence and code entry points. |
 
 The redesign now combines interaction through Sunlight's existing captured tiles with a shared
 virtual-display window bank. Spaces automation and its cover, complete window-family handling,
@@ -185,7 +185,9 @@ as did native handoff and return. Optimized Release candidates failed input and 
 the build script retains its original Debug configuration. A per-destination event tap corrects
 physical canvas drag/release events that macOS also delivers to the newly focused app.
 
-The 100 Hz target, uninterrupted modifier navigation after editing, menus and window families,
+This result is **accepted for the current performance milestone**. Sustained 100 fps is deferred
+optimization work. The [performance map](docs/sip-redesign-performance.md) identifies the source
+locations to revisit. Uninterrupted modifier navigation after editing, menus and window families,
 drag and drop, IME, capacity beyond these two banks and full product parity remain open. See the
 [build 8 findings](experiments/virtual-display-canvas/LOCAL_FINDINGS.md#capture-performance-build-8)
 for measurements, recovery results and limitations.

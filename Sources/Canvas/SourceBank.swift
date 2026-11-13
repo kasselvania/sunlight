@@ -271,6 +271,8 @@ final class SourceBank {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
 
+    // SIP PERFORMANCE: per-bank ROI and feed replacement entry point.
+    // Keep crop geometry immutable per feed; see docs/sip-redesign-performance.md.
     private func rebuildCapture() {
         captureWork = nil
         captureRevision += 1

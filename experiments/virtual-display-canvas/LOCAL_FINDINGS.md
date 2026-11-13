@@ -417,3 +417,13 @@ Native cleanup found none of the owned IDs in the apps' AX windows or the
 on-screen list. Quartz retained one unmapped Safari metadata entry after close;
 that entry was not counted as an active window. The user's source apps were not
 force-quit.
+
+### Performance milestone acceptance
+
+2026-11-13: the project owner accepted the observed near-100 fps result for this
+stage and authorized moving on with optimization locations clearly marked.
+Sustained 100 fps remains a later optimization target. This acceptance does not
+change the measured values above or close the remaining product gaps. The
+[performance map](../../docs/sip-redesign-performance.md) lists the exact code
+entry points, measurement meanings and constraints to preserve. Matching source
+comments are searchable as `SIP PERFORMANCE`.

@@ -5,6 +5,8 @@
 
 // CGDisplayStream is marked obsolete by the SDK. Resolve it as an optional
 // backend; missing symbols or a rejected start leave ScreenCaptureKit available.
+// SIP PERFORMANCE: native acquisition, queue depth and surface leases are mapped
+// in docs/sip-redesign-performance.md. Preserve the pool lease when optimizing.
 typedef CGDisplayStreamRef (*CreateStream)(CGDirectDisplayID,size_t,size_t,int32_t,CFDictionaryRef,dispatch_queue_t,CGDisplayStreamFrameAvailableHandler);
 typedef CGError (*StreamOperation)(CGDisplayStreamRef);
 

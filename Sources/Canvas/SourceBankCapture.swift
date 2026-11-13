@@ -6,6 +6,8 @@ import SourceDisplay
 
 /// One immutable capture geometry per stream. Reconfiguration starts a new
 /// instance, so an old buffer can never be cropped using a new source rectangle.
+/// SIP PERFORMANCE: backend configuration, newest-frame mailbox and delivery
+/// counters are mapped in docs/sip-redesign-performance.md.
 @MainActor
 final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private struct Mailbox: @unchecked Sendable { var buffer: CVPixelBuffer?; var scheduled = false; var received = 0; var width = 0; var height = 0 }
@@ -100,6 +102,8 @@ final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         enqueue(buffer)
     }
 
+    // SIP PERFORMANCE: profile callback-to-main delay here and in present().
+    // Retain newest-frame coalescing; frames_presented counts tile applications.
     nonisolated private func enqueue(_ buffer: CVPixelBuffer) {
         let frame = Mailbox(buffer: buffer)
         let schedule = mailbox.withLock { box in

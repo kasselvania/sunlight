@@ -41,6 +41,8 @@ enum SourceBankGeometry {
     }
     /// First free native rectangle, never a canvas coordinate. Existing slots
     /// stay fixed as windows arrive, so camera changes require no source moves.
+    // SIP PERFORMANCE: packing affects ROI size and overflow stream count.
+    // See docs/sip-redesign-performance.md; native slots stay independent of camera motion.
     static func slot(size: CGSize, display: CGRect, occupied: [CGRect]) -> CGRect? {
         let usable = CGRect(x: display.minX + 24, y: display.minY + 64,
                             width: display.width - 48, height: display.height - 88)

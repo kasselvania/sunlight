@@ -43,6 +43,8 @@ final class SourceBankHost: @unchecked Sendable {
         exit(0)
     }
 
+    // SIP PERFORMANCE: bank count, dimensions and scale control capacity and
+    // overflow contention. See docs/sip-redesign-performance.md before tuning.
     @MainActor private func createDisplay() {
         let screens = Display.all
         physical = screens.map(\.visible)
