@@ -8,7 +8,7 @@ person at the Mac has agreed to keep their hands off the mouse.
 
 ```sh
 swiftc -O -o BankFixture BankFixture.swift   # three windows A–C, 700×450, Zen-like drag strip
-swiftc -O -o drive Drive.swift               # frames / axsize / axframe / drag / dclick / mouse / moveto
+swiftc -O -o drive Drive.swift               # frames, axsize(2), axframe, axmin, drag, dclick, menu, mouse, moveto
 ./BankFixture "$PWD/ids.json" &              # writes {"pid":…, "ids":[…]}
 open "$HOME/Applications/Sunlight Canvas Lab.app" --args --sip-bank-only <id,id,id>
 python3 st.py <id,id,id>                     # bank feeds, bank records, tile world/screen rects
@@ -16,6 +16,10 @@ python3 st.py <id,id,id>                     # bank feeds, bank records, tile wo
 python3 -I phases.py ./BankFixture "$PWD" [--env SIP_MAX_STREAMS=0]   # off / animated / paused breakdown
 pkill -x BankFixture                         # by name: the binary is started as ./BankFixture
 ```
+
+Before right-clicking or dragging, confirm in a screenshot that the target tile is in front at that
+point: a context-menu action on the wrong tile resizes or moves that app's real window. Avoid Tidy
+and Arrange in a scoped run: they lay out every tile, unbanked real windows included.
 
 Notes from the run:
 

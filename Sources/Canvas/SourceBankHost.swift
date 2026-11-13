@@ -129,9 +129,19 @@ final class SourceBankHost: @unchecked Sendable {
                 let record = try park(id, pid: pid)
                 send(["event": "reply", "request": request, "record": try object(record)])
             case "place":
-                let id = (command["id"] as? NSNumber)?.uint32Value ?? 0
-                let record = try place(id)
-                send(["event": "reply", "request": request, "record": try object(record)])
+                // In order: each slot is chosen against where the ones before it were just put.
+                let ids = (command["ids"] as? [NSNumber])?.map(\.uint32Value) ?? []
+                // Optional size to make room for (a resize about to happen), else the window's own.
+                var room: CGSize?
+                if let w = (command["width"] as? NSNumber)?.doubleValue, let h = (command["height"] as? NSNumber)?.doubleValue {
+                    room = CGSize(width: w, height: h)
+                }
+                var results: [[String: Any]] = []
+                for id in ids {
+                    do { results.append(["id": id, "record": try object(try place(id, room: room))]) }
+                    catch { results.append(["id": id, "error": error.localizedDescription]) }
+                }
+                send(["event": "reply", "request": request, "results": results])
             case "release":
                 let id = (command["id"] as? NSNumber)?.uint32Value ?? 0
                 var to: CGPoint?
@@ -202,7 +212,7 @@ final class SourceBankHost: @unchecked Sendable {
 
     /// A parked window that grew into a neighbour or left its bank goes to a
     /// free slot at the size it has now. Its restoration record is unchanged.
-    private func place(_ id: CGWindowID) throws -> BankRecord {
+    private func place(_ id: CGWindowID, room: CGSize? = nil) throws -> BankRecord {
         guard let index = journal.records.firstIndex(where: { $0.id == id }) else { throw failure("This window is not parked.") }
         var record = journal.records[index]
         guard record.process.isLive, let listed = WindowList.onScreen(id), listed.pid == record.process.pid else {
@@ -210,7 +220,8 @@ final class SourceBankHost: @unchecked Sendable {
         }
         let ax = handles[id] ?? AXWindow.windowsByID(pid: record.process.pid)?[id]
         guard let ax, ax.windowID == id, !ax.isDestroyed, let frame = ax.frame else { throw failure("A parked window's Accessibility identity is unavailable.") }
-        guard let (bankID, slot) = freeSlot(size: listed.bounds.size, excluding: id, prefer: record.displayID),
+        let need = CGSize(width: max(listed.bounds.width, room?.width ?? 0), height: max(listed.bounds.height, room?.height ?? 0))
+        guard let (bankID, slot) = freeSlot(size: need, excluding: id, prefer: record.displayID),
               let bankBounds = banks[bankID] else {
             throw failure(SourceBankHost.noRoom)
         }

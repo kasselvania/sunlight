@@ -2695,7 +2695,16 @@ final class CanvasController {
     /// in Notification Center's Accessibility tree once, for its name, its card and its controls —
     /// off the main thread; until then it's "Widget" with the usual margin.
     private func makeProxy(for w: SCWindow, camera: Camera) -> WindowProxy {
-        guard Widgets.isWidget(w) else { return register(WindowProxy(window: w, camera: camera, scale: scale)) }
+        guard Widgets.isWidget(w) else {
+            let p = register(WindowProxy(window: w, camera: camera, scale: scale))
+            // A banked window moved here from another display (`move(_:to:)`): its tile goes where the
+            // move put it, as the real window would have; the window itself stays in its bank slot.
+            if let spot = desk?.takeArrival(w.windowID) {
+                p.movedByUser(to: CGRect(origin: spot, size: w.frame.size), seenThrough: camera)
+                p.placedNatively(at: w.frame)
+            }
+            return p
+        }
         // Where it is on the desktop at 1:1, whatever the camera: `arrangeDesktop` takes it from there.
         let p = register(WindowProxy(window: w, kind: .widget, widget: nil, camera: Camera(), scale: scale))
         resolveWidget(p)
@@ -3804,7 +3813,7 @@ final class CanvasController {
         let id = p.windowID, pid = p.pid, approx = p.lastRealFrame, known = p.ax
         let name = "\(p.appName) — \(p.title)"
         p.resized(toReal: CGRect(origin: approx.origin, size: size))
-        AXQueue.interactive.async { [weak self] in
+        withBankRoom(id, for: size) { AXQueue.interactive.async { [weak self] in
             let ax = known ?? AXWindow.find(windowID: id, pid: pid, approximateFrame: approx)
             var real: CGRect?
             var fullScreen = false
@@ -3832,7 +3841,15 @@ final class CanvasController {
                     if abs(p.worldRect.width - size.width) <= 0.5, abs(p.worldRect.height - size.height) <= 0.5 { p.resized(toReal: real) }
                 }
             }
-        }
+        } }
+    }
+
+    /// A banked window about to be resized first goes where its new size fits on its bank: macOS keeps
+    /// a window from growing past the edge of the display it's on, so a slot near the edge clamped it
+    /// (Left Half gave 1616 pt instead of 1703, measured 2026-11-13). Anything else goes straight on.
+    private func withBankRoom(_ id: CGWindowID, for size: CGSize, then go: @escaping () -> Void) {
+        guard let bank = desk?.sourceBank, bank.contains(id) else { return go() }
+        Task { await bank.makeRoom(id, for: size); go() }
     }
 
     // MARK: Tiling
@@ -4597,7 +4614,7 @@ final class CanvasController {
         resizeInFlight = true
         let id = p.windowID, pid = p.pid, approx = p.lastRealFrame, known = p.ax
         let size = next.size, anchor = next.anchor, finished = next.finished
-        AXQueue.interactive.async { [weak self] in
+        withBankRoom(id, for: size) { AXQueue.interactive.async { [weak self] in
             let ax = known ?? AXWindow.find(windowID: id, pid: pid, approximateFrame: approx)
             var real: CGRect?
             if let ax, !ax.isFullScreen {
@@ -4631,7 +4648,7 @@ final class CanvasController {
                     self.scheduleCapturePass()
                 }
             }
-        }
+        } }
     }
 
     /// Move Aside: windows that aren't in the layout line up in a row to its right, top-aligned, on the
@@ -8047,6 +8064,13 @@ final class CanvasController {
         if realWindowsPresented { suspendRealWindows(keepingLook: true) }
         let id = p.windowID, pid = p.pid, approx = p.lastRealFrame, known = p.ax
         let point = CanvasController.centred(p.lastRealFrame.size, in: target.display.visible)
+        // A banked window stays in its slot: only its tile changes canvas, arriving where the real
+        // window would have gone. Moving the real window would pull it off the bank.
+        if desk?.sourceBank?.contains(id) == true {
+            desk?.expectArrival(id, at: point)
+            desk?.move(id, from: self, to: target)
+            return
+        }
         desk?.move(id, from: self, to: target, listing: false)
         AXQueue.interactive.async { [weak self, weak target] in
             let ax = known ?? AXWindow.find(windowID: id, pid: pid, approximateFrame: approx)

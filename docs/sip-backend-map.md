@@ -193,15 +193,55 @@ input path (step 3 or a follow-up), not geometry.
   build 8 needs re-checking.
 - A press through a tile freezes its native/tile offset for the whole press
   ([CapturedWindowInput](../Sources/Canvas/CapturedWindowInput.swift)). When the app moves its
-  window under that press (title bar or toolbar drag), the tile moves with it
-  (`CanvasController.followCapturedDrag`), and the window is re-slotted once the press ends.
+  window under that press (title bar, toolbar or tab strip drag), the tile follows the pointer
+  (`CanvasController.followCapturedDrag`; not the native delta, which is in screen points for an
+  app-started drag), and the window is re-slotted once the press ends.
 - Entering a banked window sends the handoff's destination to the host. The window goes straight
   from its slot to that spot at its current size. Quit, crash and fallback restoration put windows
   back at their original position but keep their **current** size. The host no longer calls
   `setSize` on release.
 
-Known limits of step 1: re-slotting during a growing edge-drag can happen more than once, and each
-re-slot restarts the feed; corner bleed from the composited capture remains (step 5).
+Known limits of step 1: re-slotting during a growing edge-drag could happen more than once, and each
+re-slot restarts the feed (addressed in step 2); corner bleed from the composited capture remains
+(step 5).
+
+## Step 2 status (run live 2026-11-13)
+
+Every native-moving helper in `CanvasController` (`moveNativelyNow`, `alignSiblings`,
+`alignNatively`, `unpark`, `closeForApp`) is limited to the real-windows renderer and never runs in
+the SIP profile. Step 1's tracking already reconciles any native resize, so step 2 covers what
+reconciliation alone could not.
+
+- **Resizes make room first.** `CanvasController.resize(_:to:)` (layouts, Tidy, Arrange, tiling
+  presets, layout restore) and `pumpResize` (edge drags) call `withBankRoom` → `SourceBank.makeRoom`
+  for a banked window. If the new size doesn't fit where the window is, the host's `place` operation
+  (now with an optional size) moves it to a slot that does, before the resize. macOS keeps a window
+  from growing past the edge of its display, so a slot near the edge had clamped Left Half to 1616 pt.
+- **Re-slots are batched and settled.** One `place` request carries every window that needs a new
+  slot. Of two overlapping windows, only the one that changed last moves. A window must hold still
+  for 0.3 s (`SourceBank.settle`) before it is re-slotted, and minimized or hidden windows are skipped,
+  so the Dock's minimize and restore animations are not chased.
+- **Tiles are re-attached.** `SourceBank.consider` feeds a banked window through its current tile when
+  the tile object was made again.
+- **Moving to another display keeps the bank slot.** `move(_:to:)` hands a banked window's tile to the
+  other canvas (`Desk.expectArrival`, consumed in `makeProxy`) at the spot the real window would have
+  gone; the real window stays parked.
+
+| Check (three fixture windows banked, `--sip-bank-only`) | Result |
+|---|---|
+| Two windows resized at once, each into its neighbour | **Pass.** Both re-slotted to free slots within 0.16 s; the unchanged third window stayed. Tiles took the new size in place. |
+| Move & Resize → Left Half on a banked window | Before: clamped to 1616 × 1402. After: the window was moved to a slot with room within 0.1 s, then resized to the full **1703 × 1402**. Picture correct, live. |
+| Move & Resize → Right Half (same size) | **Pass.** Tile moved; no native move. |
+| Edge drag growing a window into its neighbour's slot | **Pass.** Exactly one re-slot (room made as soon as the requested size stopped fitting); growth continued there. |
+| Minimize, then restore from the Dock | **Pass.** No re-slot attempts during either animation (the previous build tried and was refused twice); window and tile back as they were. |
+| Quit | **Pass.** Original positions at current sizes; journal removed. A window taller than the space below its original spot was raised by macOS. |
+| Moving a banked window to another display | **Not run**: one display on this Mac. Compiles; untested. |
+
+An incident during the run: a right-click meant for a fixture tile landed on the owner's Claude tile,
+which was in front at that point, and Left Half resized the real Claude window behind the canvas.
+It was restored to its exact frame through Accessibility within a minute. Since then the live check
+confirms the target tile with a screenshot first, and it avoids Tidy and Arrange, which lay out every
+tile on the canvas and so resize unbanked real windows too.
 
 ## Not verified by this map
 

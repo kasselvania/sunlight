@@ -164,6 +164,13 @@ final class Desk {
         owner[id] = nil
     }
 
+    /// Banked windows moved to another display's canvas: where (global top-left, at 1:1) their new tile
+    /// goes. The real window stays in its bank slot, so its native frame can't say.
+    private var arrivals: [CGWindowID: CGPoint] = [:]
+
+    func expectArrival(_ id: CGWindowID, at point: CGPoint) { arrivals[id] = point }
+    func takeArrival(_ id: CGWindowID) -> CGPoint? { arrivals.removeValue(forKey: id) }
+
     /// The window was moved to another display for real: it goes to that display's canvas, which lists
     /// it now unless the move is still to be made (`listing` false).
     func move(_ id: CGWindowID, from: CanvasController, to: CanvasController, listing: Bool = true) {

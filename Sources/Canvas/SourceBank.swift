@@ -25,6 +25,9 @@ final class SourceBank {
     private var captureWork: DispatchWorkItem?
     private var banks: [CGDirectDisplayID: (bounds: CGRect, scale: CGFloat)] = [:]
     private var placing = Set<CGWindowID>()
+    /// When each banked window last moved or resized natively: of two that overlap, the one that
+    /// changed last is the one that ran into the other, and it alone is re-slotted.
+    private var changedAt: [CGWindowID: CFTimeInterval] = [:]
     private var tracker: Timer?
     private(set) var phase = "idle"
     private(set) var error: String?
@@ -119,6 +122,15 @@ final class SourceBank {
 
     func consider(_ proxies: [WindowProxy]) {
         guard phase == "running" else { return }
+        // A banked window whose tile was made again (another display's canvas, a listing that dropped
+        // and re-added it) is fed through its current tile, not the one it was parked with.
+        for p in proxies where p.kind == .window {
+            guard let entry = entries[p.windowID], entry.proxy !== p, p.pid == entry.record.process.pid else { continue }
+            entries[p.windowID] = Entry(proxy: p, record: entry.record)
+            p.owner = .canvas
+            p.placedNatively(at: entry.record.native)
+            p.beginBankCapture()
+        }
         for p in proxies where p.kind == .window && p.attachedTo == nil && p.away == nil && !p.leaving
             && !protects(p.windowID) && !native.contains(p.windowID) && refused[p.windowID] == nil
             && (scope?.contains(p.windowID) ?? true) {
@@ -162,6 +174,7 @@ final class SourceBank {
         let reply = await ask("release", values: values)
         if let text = reply["error"] as? String { native.remove(p.windowID); fail(text); return false }
         entries[p.windowID] = nil
+        changedAt[p.windowID] = nil
         p.endBankCapture()
         if let frame = reply["restored"] as? String, !frame.isEmpty { p.placedNatively(at: NSRectFromString(frame)) }
         scheduleCapture(); onChange?()
@@ -190,24 +203,40 @@ final class SourceBank {
         let ids = entries.keys.filter { !placing.contains($0) && !releasing.contains($0) && !native.contains($0) }
         let live = WindowList.onScreen(Array(ids))
         var refeed = false
-        var reslot: CGWindowID?
+        // Follow every window first, so the overlap test below sees where they all are now.
         for id in ids {
-            guard let entry = entries[id], let info = live[id], info.pid == entry.record.process.pid,
-                  let displayID = entry.record.displayID, let bank = banks[displayID]?.bounds else { continue }
-            let neighbours = entries.values.filter { $0.record.id != id && $0.record.displayID == displayID }.map(\.record.native)
-            let dragging = isDragging?(id) == true
+            // Minimized or hidden: the Dock's animation warps the frame on its way; nothing to follow.
+            guard let entry = entries[id], entry.proxy?.away == nil, let info = live[id], info.pid == entry.record.process.pid,
+                  let displayID = entry.record.displayID else { continue }
             let recorded = entry.record.native
-            let drift = SourceBankGeometry.drift(live: info.bounds, recorded: recorded, bank: bank, neighbours: neighbours)
-            if drift == .same { continue }
-            if !info.bounds.isClose(to: recorded) {
-                follow(id, to: info.bounds, from: recorded, dragging: dragging)
-                if !(captures[displayID]?.source.contains(info.bounds) ?? false) { refeed = true }
-            }
-            // Not under the pointer: a window dragged off its bank goes back once it's let go.
-            if case .reslot = drift, !dragging, placing.isEmpty, reslot == nil { reslot = id }
+            guard !info.bounds.isClose(to: recorded) else { continue }
+            changedAt[id] = CACurrentMediaTime()
+            follow(id, to: info.bounds, from: recorded, dragging: isDragging?(id) == true)
+            if !(captures[displayID]?.source.contains(info.bounds) ?? false) { refeed = true }
         }
-        if let reslot { self.reslot(reslot) }
         if refeed { scheduleCapture() }
+        guard placing.isEmpty else { return }
+        var reslot: [CGWindowID] = []
+        let now = CACurrentMediaTime()
+        for id in ids {
+            // Settled first: a window still growing under an edge drag, or still landing after a drag
+            // or a restore from the Dock, would be moved again and again.
+            guard let entry = entries[id], entry.proxy?.away == nil, live[id] != nil, let displayID = entry.record.displayID,
+                  let bank = banks[displayID]?.bounds, isDragging?(id) != true,
+                  now - (changedAt[id] ?? 0) >= SourceBank.settle else { continue }
+            let frame = entry.record.native
+            let others = entries.values.filter { $0.record.id != id && $0.record.displayID == displayID }
+            guard case .reslot = SourceBankGeometry.drift(live: frame, recorded: frame, bank: bank,
+                                                          neighbours: others.map(\.record.native)) else { continue }
+            // Off its bank: it goes back. Overlapping: only if it changed after every window it overlaps.
+            let mine = changedAt[id] ?? 0
+            let offBank = !bank.contains(frame)
+            if offBank || !others.contains(where: { $0.record.native.intersects(frame) && (changedAt[$0.record.id] ?? 0) > mine }) {
+                reslot.append(id)
+            }
+        }
+        // Not under the pointer: a window dragged off its bank goes back once it's let go.
+        if !reslot.isEmpty { self.reslot(reslot) }
     }
 
     /// The record takes the window's live frame, so its crop is cut from where
@@ -226,32 +255,61 @@ final class SourceBank {
         if !p.sizeHeld { p.placedNatively(at: frame) }
     }
 
-    /// Moves a window that outgrew its slot, or left its bank, to a free slot.
-    /// One at a time; a window that fits nowhere leaves the bank for its
-    /// original place, as one too large to park does.
-    private func reslot(_ id: CGWindowID) {
+    /// How long a window's frame must hold still before the bank moves it to a new slot.
+    static let settle: CFTimeInterval = 0.3
+
+    /// Before a resize of the canvas's own: the window goes where `size` fits on a bank, if it doesn't
+    /// fit where it is. The resize itself is the caller's; the tracker follows it.
+    func makeRoom(_ id: CGWindowID, for size: CGSize) async {
+        guard let entry = entries[id], !placing.contains(id), let displayID = entry.record.displayID,
+              let bank = banks[displayID]?.bounds else { return }
+        let wanted = CGRect(origin: entry.record.native.origin, size: size)
+        let others = entries.values.filter { $0.record.id != id && $0.record.displayID == displayID }.map(\.record.native)
+        if bank.contains(wanted), !others.contains(where: { $0.intersects(wanted) }) { return }
         placing.insert(id)
+        let reply = await ask("place", values: ["ids": [id], "width": Double(size.width), "height": Double(size.height)])
+        placing.remove(id)
+        // The tile already has the size asked for; only the record moves (`placedNatively` would put
+        // the tile back to the window's present size).
+        await applyPlacements(reply, updatingTiles: false)
+    }
+
+    /// Moves windows that outgrew their slots, or left their bank, to free slots: all of them in one
+    /// host request (a Tidy or a layout resizes many windows at once). A window that fits nowhere
+    /// leaves the bank for its original place, as one too large to park does.
+    private func reslot(_ ids: [CGWindowID]) {
+        placing.formUnion(ids)
         Task { [weak self] in
             guard let self else { return }
-            let reply = await self.ask("place", values: ["id": id])
-            self.placing.remove(id)
-            guard self.phase == "running", let entry = self.entries[id] else { return }
-            if let text = reply["error"] as? String {
+            let reply = await self.ask("place", values: ["ids": ids])
+            self.placing.subtract(ids)
+            await self.applyPlacements(reply, updatingTiles: true)
+        }
+    }
+
+    private func applyPlacements(_ reply: [String: Any], updatingTiles: Bool) async {
+        guard phase == "running" else { return }
+        if let text = reply["error"] as? String { Log.note("Window bank: re-slot: \(text)"); return }
+        var moved = false
+        for item in reply["results"] as? [[String: Any]] ?? [] {
+            guard let id = (item["id"] as? NSNumber)?.uint32Value, let entry = self.entries[id] else { continue }
+            if let text = item["error"] as? String {
                 Log.note("Window bank: re-slot \(id): \(text)")
                 if text == SourceBankHost.noRoom, let p = entry.proxy {
                     self.refused[id] = text
                     _ = await self.release(p)
                     self.native.remove(id)
                 }
-                return
+                continue
             }
-            guard let object = reply["record"], let data = try? JSONSerialization.data(withJSONObject: object),
-                  let record = try? JSONDecoder().decode(BankRecord.self, from: data) else { return }
+            guard let object = item["record"], let data = try? JSONSerialization.data(withJSONObject: object),
+                  let record = try? JSONDecoder().decode(BankRecord.self, from: data) else { continue }
             self.entries[id] = Entry(proxy: entry.proxy, record: record)
-            entry.proxy?.placedNatively(at: record.native)
+            if updatingTiles { entry.proxy?.placedNatively(at: record.native) }
             Log.note("Window bank: \(id) re-slotted to \(NSStringFromRect(record.native))")
-            self.scheduleCapture()
+            moved = true
         }
+        if moved { scheduleCapture() }
     }
 
     func stop() async -> Bool {

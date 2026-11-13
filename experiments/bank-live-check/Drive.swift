@@ -6,6 +6,9 @@
 //   dclick <x> <y>             double-click
 //   mouse                      current pointer location
 //   moveto <x> <y>             move pointer
+//   menu <pid> <x> <y> <a>[/<b>]  right-click, then press menu item a (and b in its submenu) of process pid
+//   axmin <pid> <id> <0|1>     minimize (1) or restore (0) a window
+//   axsize2 <pid> <id> <w> <h> <id> <w> <h>   resize two windows back to back
 import AppKit
 import ApplicationServices
 
@@ -73,6 +76,39 @@ case "mouse":
     print(l.x, l.y)
 case "moveto":
     post(.mouseMoved, CGPoint(x: d(2), y: d(3)))
+case "menu":
+    let pid = pid_t(a[2])!, p = CGPoint(x: d(3), y: d(4))
+    post(.mouseMoved, p); usleep(150_000)
+    for t in [CGEventType.rightMouseDown, .rightMouseUp] {
+        let e = CGEvent(mouseEventSource: CGEventSource(stateID: .hidSystemState), mouseType: t, mouseCursorPosition: p, mouseButton: .right)!
+        e.post(tap: .cghidEventTap); usleep(60_000)
+    }
+    usleep(500_000)
+    let app = AXUIElementCreateApplication(pid)
+    func find(_ e: AXUIElement, _ title: String, _ depth: Int) -> AXUIElement? {
+        var role: CFTypeRef?, t: CFTypeRef?, kids: CFTypeRef?
+        AXUIElementCopyAttributeValue(e, kAXRoleAttribute as CFString, &role)
+        AXUIElementCopyAttributeValue(e, kAXTitleAttribute as CFString, &t)
+        if (role as? String) == kAXMenuItemRole as String, (t as? String) == title { return e }
+        guard depth > 0, AXUIElementCopyAttributeValue(e, kAXChildrenAttribute as CFString, &kids) == .success else { return nil }
+        for k in (kids as? [AXUIElement]) ?? [] { if let f = find(k, title, depth - 1) { return f } }
+        return nil
+    }
+    for (i, title) in a[5].split(separator: "/").map(String.init).enumerated() {
+        guard let item = find(app, title, 8) else { print("no menu item:", title); exit(1) }
+        print("press", title, AXUIElementPerformAction(item, kAXPressAction as CFString).rawValue)
+        usleep(i == 0 ? 400_000 : 200_000)
+    }
+case "axmin":
+    guard let w = axWindow(pid: pid_t(a[2])!, id: CGWindowID(a[3])!) else { print("no AX window"); exit(1) }
+    print("set:", AXUIElementSetAttributeValue(w, kAXMinimizedAttribute as CFString, (a[4] == "1") as CFBoolean).rawValue)
+case "axsize2":
+    let pid = pid_t(a[2])!
+    for k in [3, 6] {
+        guard let w = axWindow(pid: pid, id: CGWindowID(a[k])!) else { print("no AX window", a[k]); exit(1) }
+        var size = CGSize(width: d(k + 1), height: d(k + 2))
+        print("set", a[k], AXUIElementSetAttributeValue(w, kAXSizeAttribute as CFString, AXValueCreate(.cgSize, &size)!).rawValue)
+    }
 default:
     print("unknown"); exit(2)
 }
