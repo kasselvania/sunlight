@@ -1,5 +1,11 @@
 # Native window mirrors with SIP enabled
 
+**Result on macOS 26.4.1: this implementation did not render separate-app
+windows, including with Screen Recording granted.** The originals contained
+pixels and all three foreign owners were verified; only the same-app control
+rendered. Retain this directory as a reproduction of that negative result.
+The current experiment is [the virtual-display canvas](../virtual-display-canvas/README.md).
+
 This is a renderer feasibility experiment for preserving Sunlight's full experience
 without disabling SIP. It investigates an alternative to both Dock injection and
 one capture stream per window. It does not run Sunlight's normal application.

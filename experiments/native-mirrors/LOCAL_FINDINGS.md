@@ -105,3 +105,25 @@ case returned exit status 0. Their raw outputs are retained in
 `build/native-mirrors-clarified/setup-check.json` and
 `build/native-mirrors-clarified/missing-fixture-check.json`. Both continue to
 report rendering as unverified.
+
+## Qualified negative result for the native-mirror candidate
+
+The subsequent user run ending `B8A1E635-C186-41A5-AC47-0810A3291D06`
+recorded four bound sources, three matched foreign owners, Screen Recording
+preflight true, and a manual `blank_or_frozen` observation. The user's screenshot
+shows the same-app control and blank B–D tiles. Permission and successful
+ownership lookup did not make the separate-app mirrors render.
+
+An independent local reproduction on the same source revision captured only
+the lab's selected original B and its own viewer. Original B contains its
+orange marker and sequence 37; the viewer contains its blue control at
+sequence 18, with all three foreign tiles blank. The source itself drew
+correctly. The scoped captures are retained locally in
+`build/native-mirror-investigation/original-b.png` and `viewer.png`, alongside
+`context.json` and `setup-check.json`.
+
+This is a negative result for this `CAPluginLayer` implementation on this Mac,
+not a proof that every possible compositor API or every macOS version behaves
+the same. The virtual-display/public-capture experiment now carries the work
+forward. No further permission changes or user retries of this native probe
+are needed for that decision.
