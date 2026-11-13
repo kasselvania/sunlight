@@ -13,6 +13,7 @@ swiftc -O -o drive Drive.swift               # frames / axsize / axframe / drag 
 open "$HOME/Applications/Sunlight Canvas Lab.app" --args --sip-bank-only <id,id,id>
 python3 st.py <id,id,id>                     # bank feeds, bank records, tile world/screen rects
 ./fps-run.sh <headroom> <id,id,id>           # launch, sample 8 s of feed counters, quit
+python3 -I phases.py ./BankFixture "$PWD" [--env SIP_MAX_STREAMS=0]   # off / animated / paused breakdown
 pkill -x BankFixture                         # by name: the binary is started as ./BankFixture
 ```
 
@@ -21,4 +22,7 @@ Notes from the run:
 - The tiles' screen rects in `st.py` output are global top-left points, the coordinates `drive` uses.
 - A tile's title strip is its top 28 world points. A press below it goes to the app. The fixture's
   strip (top 64 points) calls `performDrag(with:)`, as Firefox- and Chromium-based browsers do.
-- `SIP_BANK_HEADROOM` (points, via `open --env`) overrides the feed headroom for measurements.
+- `SIP_BANK_HEADROOM` (points) and `SIP_MAX_STREAMS` (per-window fallback streams), via `open --env`,
+  override those settings for measurements.
+- The fixture opts out of App Nap, redraws at 100 Hz, writes draws/s to `ids.json.stats`, and
+  pauses or resumes on SIGUSR1.

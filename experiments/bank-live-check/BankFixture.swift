@@ -10,6 +10,7 @@ final class Pulse: NSView {
     override var mouseDownCanMoveWindow: Bool { false }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     var drags = 0
+    var drawn = 0
     // Like a Firefox/Chromium tab strip: the app starts the window drag itself.
     override func mouseDown(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
@@ -17,6 +18,7 @@ final class Pulse: NSView {
         if p.y < 64 { drags += 1; window?.performDrag(with: event) }
     }
     override func draw(_ dirtyRect: NSRect) {
+        drawn += 1
         NSColor(calibratedHue: CGFloat(label.unicodeScalars.first!.value % 7) / 7, saturation: 0.35, brightness: 0.95, alpha: 1).setFill()
         bounds.fill()
         let text = "\(label)  \(tick)" as NSString
@@ -33,6 +35,10 @@ final class Delegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     var windows: [NSWindow] = []
     var views: [Pulse] = []
     let out: String
+    var activity: NSObjectProtocol?
+    var paused = false
+    var ticks = 0
+    let pauseSource = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
     init(out: String) { self.out = out }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace] }
@@ -53,8 +59,29 @@ final class Delegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
             w.makeKeyAndOrderFront(nil)
             windows.append(w); views.append(v)
         }
-        Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] _ in
-            self?.views.forEach { $0.tick += 1; $0.needsDisplay = true }
+        // Not throttled as a background app (App Nap): the windows live on a display nobody looks at.
+        activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical], reason: "bank live check")
+        let t = Timer(timeInterval: 1.0 / 100, repeats: true) { [weak self] _ in
+            guard let self, !paused else { return }
+            ticks += 1
+            views.forEach { $0.tick += 1; $0.needsDisplay = true }
+        }
+        RunLoop.main.add(t, forMode: .common)
+        // SIGUSR1 pauses/resumes the animation, so a run can compare animated and static banks.
+        signal(SIGUSR1, SIG_IGN)
+        pauseSource.setEventHandler { [weak self] in self?.paused.toggle() }
+        pauseSource.resume()
+        // Once a second: timer ticks and actual draws per window, to <out>.stats as JSON lines.
+        Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            let line: [String: Any] = ["t": Date().timeIntervalSince1970, "paused": paused, "ticks": ticks,
+                                       "drawn": views.map(\.drawn)]
+            ticks = 0; views.forEach { $0.drawn = 0 }
+            let path = self.out + ".stats"
+            if !FileManager.default.fileExists(atPath: path) { FileManager.default.createFile(atPath: path, contents: nil) }
+            if let data = try? JSONSerialization.data(withJSONObject: line), let h = FileHandle(forWritingAtPath: path) {
+                h.seekToEndOfFile(); h.write(data); h.write("\n".data(using: .utf8)!); try? h.close()
+            }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [self] in
             let ids = windows.map { $0.windowNumber }

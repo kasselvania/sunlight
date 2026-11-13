@@ -5828,7 +5828,13 @@ final class CanvasController {
     /// None at all without screen capture mode or preview mode (`Settings.capturesStream`): the capture
     /// renderer is then only the stand-in while live windows come back, and every window and widget is a
     /// still.
-    static var maxStreams: Int { SIPRedesign.enabled ? Int.max : Settings.capturesStream ? 8 : 0 }
+    static var maxStreams: Int { SIPRedesign.enabled ? sipStreamLimit : Settings.capturesStream ? 8 : 0 }
+    /// With the window bank, a per-window stream is only the fallback for a window the bank can't hold
+    /// (too large, full screen, attached). Those keep Sunlight's own capture policy (eight streams,
+    /// `fps(forLevel:)`): uncapped 100 fps streams saturated WindowServer and starved the bank's feeds
+    /// and the apps themselves (measured 2026-11-13: 23.5 vs 99.7 bank frames/s with eight unbanked
+    /// windows, docs/sip-backend-map.md). `SIP_MAX_STREAMS` overrides the cap for measurements.
+    private static let sipStreamLimit = ProcessInfo.processInfo.environment["SIP_MAX_STREAMS"].flatMap { Int($0) }.map { max(0, $0) } ?? 8
     /// A streaming window keeps its stream against a newcomer until the newcomer is this much larger on
     /// screen, so a pan doesn't stop and start streams back and forth.
     static let streamHysteresis: CGFloat = 1.5
@@ -5958,7 +5964,7 @@ final class CanvasController {
             return v.isNull ? 0 : v.width * v.height
         }
         let candidates = view.proxies.compactMap { p -> (id: ObjectIdentifier, area: CGFloat, streaming: Bool, capped: Bool)? in
-            guard p.kind == .window, !p.inFront else { return nil }
+            guard p.kind == .window, !p.inFront, desk?.sourceBank?.contains(p.windowID) != true else { return nil }   // banked: the shared feed
             if case .far = p.viewport { return nil }
             let area = max(onScreen(camera.toScreen(p.worldRect)), target.map { onScreen($0.toScreen(p.worldRect)) } ?? 0)
             return (ObjectIdentifier(p), area, p.isStreaming, p.capped)
@@ -5983,7 +5989,7 @@ final class CanvasController {
             }
             let k = min(lod.applied, p.maxCaptureLevel)
             var level = WindowCapture.Level(factor: CanvasController.factor(forLevel: k),
-                                           fps: SIPRedesign.enabled ? SIPRedesign.frameRate(displayID: display.id) : CanvasController.fps(forLevel: k))
+                                           fps: CanvasController.fps(forLevel: k))
             var stop = asleep
             var isFar = false
             if case .far(let since) = p.viewport {

@@ -140,8 +140,32 @@ the window list and screenshots.
 | Resize into a neighbour's slot | **Pass.** B grew to 1320 pt, overlapped C, and was re-slotted to the second row at `{-6120, 530}`. Tile live and correctly cropped. |
 | Enter a resized window (double-click on the title strip) | **Pass.** B came out at `{1055, 514}` at **1320 × 450**, its canvas size, camera at 1:1, its app in front. Back on the canvas, B was re-parked at the same size. |
 | Quit | **Pass.** Windows back at their original positions at their **current** sizes; journal removed. |
-| Throughput | 22–28 frames/s received, WindowServer about 100% CPU while running (11% after quit). Margin 0 vs 384 measured 24.1 vs 21.9 frames/s: the headroom is not the cause. Not comparable to build 8's 93 frames/s: here the unbanked windows each had their own ScreenCaptureKit stream, and the test windows redraw from a background-app timer. **Unresolved.** |
+| Throughput | 22–28 frames/s at first, WindowServer about 100%. Margin 0 vs 384 measured 24.1 vs 21.9 frames/s: the headroom is not the cause. **Resolved, see below.** |
 | Display identities | Two Sunlight profiles before and after; ColorSync idle. |
+
+### Throughput breakdown
+
+[phases.py](../experiments/bank-live-check/phases.py) measures, in one run, the fixture's actual
+draws/s (App Nap off, 100 Hz timer), the bank feed's frames/s, and `top` CPU for WindowServer,
+Sunlight and the fixture: with Sunlight off, then with the three fixture windows banked and
+animated, then paused. The owner's other 5–8 windows stayed unbanked (`--sip-bank-only`).
+
+| Configuration | Fixture draws/s | Bank feed frames/s | WindowServer, animated / paused |
+|---|---|---|---|
+| Sunlight off | 100 | – | 37–41% |
+| Unbanked windows streamed at 100 fps, uncapped (build 12 as first run) | 41–48 | 20.5–23.5 | 95–104% / 85–88% |
+| Unbanked windows not streamed (`SIP_MAX_STREAMS=0`) | 100 | **99.7** | 44% / 12% |
+| Unbanked windows at Sunlight's own policy (8 streams, 30/15/10 fps), **now the default** | 91 | 50.8 | 89% / 78% |
+
+The bank delivers the display's full 100 Hz at full Retina resolution, headroom included. The cost
+was the per-window ScreenCaptureKit streams of windows outside the bank: the SIP profile had
+removed Sunlight's cap and ran each at the display rate. That saturated WindowServer, which then
+throttled the source apps' own drawing (the fixture's timer fell from 100 to 41 ticks/s). Per-window
+streams are now only a fallback for windows the bank can't hold, and they keep Sunlight's original
+policy (`CanvasController.maxStreams`, `fps(forLevel:)`). Banked windows no longer count against the
+cap. In normal use, where every window that fits is banked, there are few or no such streams; the
+`SIP_MAX_STREAMS=0` row is the closest measurement to that, and build 8 measured 93 frames/s with
+all windows banked. Banking the owner's real windows was not re-measured in this run.
 
 Found and fixed during the run: a build-11 journal record for a window on another Space blocked
 every launch ("restoration identity is unavailable"), because Accessibility can't reach such a
