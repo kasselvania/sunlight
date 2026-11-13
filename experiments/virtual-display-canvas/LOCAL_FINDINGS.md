@@ -195,3 +195,115 @@ Virtual-display integration, covered Spaces consolidation, complete menus and
 window families, native drag and drop, IME, global-pointer-dependent apps,
 multi-display behavior and sustained performance still require implementation
 or qualification before the full redesign can be called complete.
+
+## Installed window bank build 7
+
+2026-11-13: the bank is integrated into the original Swift Sunlight target, not
+just the earlier Objective-C renderer experiment. The installed identity remains
+`com.kasselvania.sunlight.virtualcanvas`, at
+`~/Applications/Sunlight Canvas Lab.app`. Normal LaunchServices launches retained
+Screen Recording and Accessibility access. SIP remained fully enabled; no boot
+arguments, injected add-on, privileged service or privacy-database modification
+was used.
+
+`SourceBankHost` owns the temporary display and exact Accessibility window
+handles. It journals the original AX/Quartz geometry, window number, owning
+process birth and document URI when available before each placement. The canvas
+owns world layout and input; the host's native source positions never replace
+canvas coordinates. `SourceBankCapture` supplies one ScreenCaptureKit display
+feed, with immutable geometry per stream and cropped, retained pixel buffers for
+each tile. A private pipe's EOF restores the originals after a main-process
+crash. A helper crash triggers a recovery-only child. Interrupted disk recovery
+runs before `Desk` discovers windows. Failed restoration retains the journal;
+clean quit requires its retirement, including when no host process remains.
+
+The actual virtual display settled at `{-3072, 0, 3072, 2048}`, backing scale 2.
+Its placement comes from macOS; no physical display configuration was rewritten.
+The owned Safari window occupied `{-3048, 64, 1100, 850}` and TextEdit
+`{-1932, 64, 673, 439}`. Together their capture ROI was 1789 × 850 logical points,
+3578 × 1700 backing pixels. Unsupported or oversized windows fall back to the
+existing per-window path. This finite bank does not establish unlimited capacity.
+
+Earlier mode probes found that 4096 × 3072 and 4096 × 2048 logical modes could
+return a display ID without becoming an online display. Those candidates were
+rejected. The implementation now waits for actual active-display membership,
+separate bounds and Retina backing before parking anything. Display removal is
+checked with a fresh `CGGetActiveDisplayList`; the creating process's
+`CGDisplayIsActive` observation could remain stale after teardown.
+
+The delivered interaction fix uses a private mouse-event source and a shared,
+increasing event number for each down/drag/up sequence. `needsPanelToBecomeKey`
+keeps captured content from stealing native editing focus. Focus preparation
+uses the exact AX window number, with no nearest-frame substitution. Three
+repeated development focus/edit/selection cycles passed after this correction.
+Earlier covered-tile preparation was invalid; subsequent native-control checks
+used the real Windows on Canvas menu and refused pointer/key input unless the
+owned TextEdit tile was the intended target.
+
+The final signed installed app was checked with two owned windows, a real Safari
+process displaying a local animation and a disposable TextEdit document:
+
+- Both originals were parked off the physical display and shown through one
+  shared Retina feed. Browser screenshots show changing frame numbers and a
+  moving dot. TextEdit's captured tile visibly showed the inserted text and
+  selection.
+- Native AX observations verified a clicked caret, insertion of six individual
+  virtual-key letters, a 17-character drag selection and an increased vertical
+  scrollbar value. Editing/scrolling left the camera fixed.
+- Plain scrolling over empty canvas panned it; modifier scrolling with the
+  canvas reactivated changed zoom. Native source positions stayed fixed.
+- Double-clicking the TextEdit tile's title released it from the bank and entered
+  the existing native handoff at zoom 1. Returning through Windows on Canvas
+  parked it again; the shared feed settled back to the two-window ROI.
+- Clean quit restored both original positions, exited the child, removed the
+  owned display and cleared the journal.
+- Killing only the main app exercised real pipe EOF: the surviving host restored
+  both sources and removed its display and journal.
+- `SIGUSR1` to the positively identified host released its actual virtual display.
+  The display-disconnect path restored both windows while the canvas remained
+  available through ordinary capture.
+- Killing only the host exercised automatic journal recovery while the main app
+  remained open. The originals returned and the bank stopped without retaining
+  a display or journal.
+- Stopping the host, killing the main app, then killing that host left a genuine
+  interrupted journal. A normal relaunch with parking scoped to an empty set
+  recovered both sources before canvas discovery. Final quit removed the new
+  empty display. Fresh active-display enumeration returned only physical ID 2.
+
+Evidence is under ignored `build/sip-redesign/bank-check`: `installed-start.json`,
+`installed-functional.json`, `installed-text.png`, `installed-browser-0.png`,
+`installed-browser-1.png`, `installed-frame-observation.json`,
+`installed-parent-crash.json`, `installed-display-disconnect.json`,
+`installed-host-crash.json`, `installed-both-crash-relaunch.json`,
+`installed-final-cleanup.json`, `installed-artifact.json` and
+`final-verification.log`. `verify-final.py` runs the bounded installed workflow;
+it scopes parking to the two owned window IDs and pins main/host identity before
+sending failure signals. These are synthetic native-UI checks, not physical
+human-input or broad application acceptance.
+
+The final eight-second observation delivered 23.75 complete frames/s in the
+observed mixed workload while requesting 100. This remains a performance gap, not a 100 Hz
+success. Modifier-scroll zoom after captured editing currently needs canvas
+reactivation; the uninterrupted source-focused path did not pass. Some inherited
+tile labels also overlap other content. Window families and menus, source
+resizing, bank capacity, IME, native drag and drop, global-pointer polling,
+unresponsive applications and physical-monitor removal remain unqualified.
+The source-display disconnect check does not substitute for monitor unplug.
+Covered Spaces consolidation remains unimplemented. No full-product-parity or
+input-latency result is claimed.
+
+The final control script also rejected an earlier navigation preparation: its
+fixed "empty canvas" coordinate was covered when the camera returned home. The
+helper now derives an empty point from all current tile rectangles and refuses
+to post the pan/zoom unless that point is clear. The rejected run is retained as
+`final-preparation.log`; it was not used as a successful navigation observation.
+The final successful native caret/typing/selection offsets were 660, 666 and
+`{660, 17}`. The inspected Safari frames advanced from 415385 to 415550 with the
+dot visibly moving. Twenty-three focused coordinate, camera, handoff and bank
+geometry checks passed. Build, shell syntax, strict deep signature and Git
+whitespace checks passed.
+
+The final installed executable SHA-256 is
+`2ac5f2711bd07cd2b4d5d64cb420ac86ef889fc6656ef6e26a17f366808f1e83`.
+The app is left closed after restoration; only the two owned fixture windows
+were closed during cleanup.

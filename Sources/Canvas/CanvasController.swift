@@ -383,9 +383,6 @@ final class CanvasController {
         }
         view.onCapturedInput = { [weak self] proxy, event, world in
             self?.wantsFrontUntil = 0
-            // A nonactivating panel can hold key focus even while the source
-            // app is frontmost. Release it before asking that app to edit.
-            self?.window.resignKey()
             return self?.capturedInput.pointer(event, to: proxy, world: world) ?? false
         }
         view.onCapturedInputCleared = { [weak self] in self?.capturedInput.clear() }
@@ -646,6 +643,11 @@ final class CanvasController {
     }
 
     // MARK: Rendering mode
+
+    func sourceBankChanged() {
+        scheduleDiff()
+        scheduleCapturePass()
+    }
 
     var redesignStatus: [String: Any] {
         ["window_id": window.windowNumber, "display_id": display.id,
@@ -1358,6 +1360,7 @@ final class CanvasController {
 
     private func showNow() {
         if SIPRedesign.enabled { capturedInput.clear(); window.level = .floating }
+        desk?.sourceBank?.returnToCanvas()
         springDrag = false
         window.ignoresMouseEvents = false
         NSApp.activate()
@@ -2265,6 +2268,7 @@ final class CanvasController {
 
     private func reconcile(with list: [WindowInfo]) {
         guard !configuringRenderer, isUp, activeProxy == nil, !handingOff, addingWidgets == nil, !deskEditing else { return }
+        desk?.sourceBank?.observe(list)
         // The last entered window survives going native-fullscreen, which puts it on another Space
         // and off this list — as long as it still exists at all.
         var keep = lastActiveProxy?.windowID
@@ -2338,7 +2342,8 @@ final class CanvasController {
         for w in wanted {
             guard let p = proxies[w.id] else { continue }
             p.retitle(w.title ?? "")
-            switch WindowSync.verdict(owner: p.owner, isWidget: p.kind == .widget, capturing: renderer == .capture,
+            switch WindowSync.verdict(owner: desk?.sourceBank?.protects(p.windowID) == true ? .canvas : p.owner,
+                                      isWidget: p.kind == .widget, capturing: renderer == .capture,
                                       transformed: renderer == .realWindows && realWindowsPresented,
                                       listed: w.bounds, last: p.lastRealFrame, sizeHeld: p.sizeHeld) {
             case .keep:
@@ -4723,6 +4728,13 @@ final class CanvasController {
     /// it never leaves the screen on the way (live windows; see `slide(into:)`).
     func handoff(to p: WindowProxy, placement: Placement = .centered, spatial: Bool = false, gliding from: CGPoint? = nil) {
         guard !handingOff, p.kind == .window else { return letGo(p) }
+        if let bank = desk?.sourceBank, bank.contains(p.windowID) {
+            Task { [weak self, weak p] in
+                guard let self, let p, await bank.release(p) else { return }
+                self.handoff(to: p, placement: placement, spatial: spatial, gliding: from)
+            }
+            return
+        }
         // A sheet or prompt is entered through its parent, which it rides on; the clicked spot stays put.
         if let parent = parentOf(p) {
             var placement = placement
@@ -5791,6 +5803,7 @@ final class CanvasController {
         passTimer?.invalidate()
         passTimer = nil
         guard !configuringRenderer else { return }
+        desk?.sourceBank?.consider(view.proxies)
         if renderer == .realWindows {
             updateRealWindows()
             streamWidgets()
@@ -5890,6 +5903,12 @@ final class CanvasController {
 
         var streaming = 0, far = 0, front = 0, capped = 0
         for p in view.proxies {
+            if desk?.sourceBank?.contains(p.windowID) == true {
+                p.inFront = false
+                p.capped = false
+                streaming += 1
+                continue
+            }
             if p.inFront {
                 p.capped = false
                 p.stopCapture()

@@ -32,7 +32,7 @@ path = pathlib.Path(sys.argv[1])
 info = plistlib.loads(path.read_bytes())
 info.update(CFBundleIdentifier="com.kasselvania.sunlight.virtualcanvas",
             CFBundleName="Sunlight Canvas Lab", CFBundleDisplayName="Sunlight Canvas Lab",
-            CFBundleVersion="6", LSUIElement=False, SunlightSIPRedesign=True)
+            CFBundleVersion="7", LSUIElement=False, SunlightSIPRedesign=True)
 info.pop("NSAppleEventsUsageDescription", None)
 path.write_bytes(plistlib.dumps(info))
 PY

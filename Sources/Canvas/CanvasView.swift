@@ -537,6 +537,12 @@ final class CanvasView: NSView {
 
     override var acceptsFirstResponder: Bool { true }
 
+    override var needsPanelToBecomeKey: Bool {
+        guard SIPRedesign.enabled, let event = NSApp.currentEvent,
+              event.modifierFlags.intersection([.command, .option, .control]).isEmpty else { return true }
+        return capturedInputTarget(at: topLeftPoint(event)) == nil
+    }
+
     /// The Mac's appearance flipped (System Settings › Appearance, or Auto at dusk and dawn): the canvas
     /// follows if it's set to match.
     override func viewDidChangeEffectiveAppearance() {
@@ -2554,6 +2560,7 @@ final class CanvasView: NSView {
         cancelAnimation()
         if let target = capturedInputTarget(at: screenPoint),
            event.modifierFlags.intersection([.command, .option, .control]).isEmpty {
+            raise(target)
             dragging = nil
             // Preparing a new target releases the previous gesture. Latch this
             // press only after preparation so its matching up remains ours.

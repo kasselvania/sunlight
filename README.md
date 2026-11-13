@@ -77,7 +77,7 @@ alternatives. A working renderer experiment is evidence for one component, not p
 |---|---|---|
 | Security and startup | No SIP changes, boot arguments, Dock injection or privileged loader. A stable signed app opens normally and keeps its privacy identity. | Explicit SIP-enabled launch profile; omit the injected helper from its bundle. |
 | Canvas navigation | Preserve the existing camera, inertia, easing, snapping and gestures. Rendering follows the display cadence independently of source capture. | Reuse `CanvasView`, `Camera`, `Motion` and the display link. |
-| Live windows | All visible app windows remain live and sharp at their displayed size. The demo's eight-stream and 30/15/10 fps limits are not the redesign's quality standard. | Existing captured-window backend first; integrate the demonstrated virtual-display feed where it improves liveness and cost. |
+| Live windows | All visible app windows remain live and sharp at their displayed size. The demo's eight-stream and 30/15/10 fps limits are not the redesign's quality standard. | Shared virtual-display feed integrated with the existing canvas; ordinary window capture remains the fallback when a window cannot be parked. |
 | App interaction | Click, type, select, scroll and drag through a window at its current canvas zoom. Input reaches the intended real app/window without changing the camera merely to make input possible. | Explicit coordinate/focus bridge; retain existing window controls and canvas gestures. |
 | Focus and handoff | Preserve click/focus, zoom-to-window, return-to-canvas and native-window access. No flashes of unrelated windows. | Reuse existing navigation; replace privileged native transactions with covered transitions where needed. |
 | Window management | Preserve move, resize, close, minimize, hide, stacking, groups, snapping, pushing, Arrange, Tidy and strip mode. | Existing model and Accessibility operations; compose visible order in Sunlight. |
@@ -88,10 +88,10 @@ alternatives. A working renderer experiment is evidence for one component, not p
 | Spaces transition concession | Desktop consolidation may take longer underneath a smooth, reactive cover. Completion follows real OS state. This concession applies at startup/reorganization, not to everyday interaction or frame rate. | A stationary covering window; no timer-only claim that OS work finished. |
 | Performance | Match the connected display's cadence where content supports it; the current local target is 100 Hz. Measure delivered frames and input feedback at useful resolutions. | Reuse display-linked rendering and newest-frame delivery. Prior latency budgets were estimates, not measured acceptance. |
 
-The first implementation slice is interaction with real applications through Sunlight's existing
-captured tiles. The virtual-display lab remains a renderer proof. Spaces automation and its cover,
-complete window-family handling, native input compatibility and sustained performance remain required
-work until actually demonstrated. Development launches do not consolidate the user's Desktops.
+The redesign now combines interaction through Sunlight's existing captured tiles with a shared
+virtual-display window bank. Spaces automation and its cover, complete window-family handling,
+native input compatibility and sustained performance remain required work until actually
+demonstrated. Development launches do not consolidate the user's Desktops.
 
 ### First implementation slice
 
@@ -106,9 +106,8 @@ The bridge uses Accessibility, PID event posting, private event addressing (`CGE
 and the window-number field), and no injected code. That private API is an OS-compatibility dependency;
 its availability and a successful TextEdit interaction do not establish compatibility with every app.
 Context menus, child windows, native drag and drop, IME and apps that poll the global pointer still
-need implementation or qualification. The virtual-display bank and covered Spaces consolidation
-are not integrated yet. The initial profile has Show Canvas, Fit All Windows and Quit commands;
-the rest of Sunlight's application integration remains to be ported.
+need implementation or qualification. Covered Spaces consolidation is not integrated. The rest
+of Sunlight's application integration remains to be ported.
 
 Build and install using the existing development identity so the app keeps its privacy identity:
 
@@ -128,6 +127,40 @@ TextEdit accepted clicks at two positions, keyboard input at each clicked caret,
 through an approximately 80% tile while the camera stayed fixed. The visible tile reflected those edits.
 Quit and normal relaunch preserved access. See the [local findings](experiments/virtual-display-canvas/LOCAL_FINDINGS.md#installed-redesign-build-6)
 for the bounded evidence and the earlier failures. Sustained performance and full product parity remain open.
+
+### Window bank integration — build 7
+
+The same Swift app now parks eligible real windows on one temporary Retina virtual display and
+crops their live tiles from one ScreenCaptureKit display stream. Native source placement is separate
+from canvas layout: pan, zoom and tile stacking do not rearrange the bank. Windows that cannot be
+identified exactly through Accessibility, or cannot fit, stay on their original display and use the
+existing capture path. The current bank is 3072 × 2048 logical points at 2× backing scale; it is a
+bounded first implementation, not an unlimited-window solution.
+
+An unprivileged child of the signed app owns the display and original-window placements. It writes
+process birth, exact window identity and original geometry before moving anything. Normal quit and
+parent-process death restore the originals before releasing the display. Helper failure triggers
+journal recovery; a relaunch also recovers an interrupted journal before discovering canvas windows.
+Failed restoration retains its record and does not report a clean quit. No injected helper or SIP
+exception is involved. Virtual-display creation and addressed input use private macOS APIs, which
+remain compatibility dependencies.
+
+Open the installed app normally. **Windows on Canvas** brings a covered tile forward. Double-click
+its title strip for native-window access; **Show Canvas** returns to the canvas. **Return Originals
+and Stop Bank** restores the sources while leaving the ordinary capture canvas available; **Start
+Window Bank** starts it again. Quit restores sources and removes the owned display.
+
+The installed signed build was exercised with an owned TextEdit document and a real Safari window:
+live browser motion, native caret placement, insertion, selection, scrolling, camera movement,
+native handoff and return. Main-process crash, helper crash, actual source-display teardown, and
+both-process crash followed by relaunch all restored the sources. These checks scoped parking to
+the two owned windows; broad application and capacity compatibility remain open.
+
+The shared stream delivered roughly **24 complete frames/s** in the observed mixed workload while
+requesting 100; this does not meet the product's 100 Hz performance target. Modifier-scroll zoom
+currently requires reactivating the canvas after captured editing. Window families, menus, IME,
+native drag and drop, global-pointer-dependent apps, bank resizing/capacity and physical-monitor
+unplug remain required work. See the [build 7 findings](experiments/virtual-display-canvas/LOCAL_FINDINGS.md#installed-window-bank-build-7).
 
 ## Getting around
 

@@ -19,6 +19,8 @@ final class CapturedWindowInput {
     private var pending: [CGEvent] = []
     private var revision = 0
     private var pointerDown: CGEvent?
+    private let postedSource = CGEventSource(stateID: .privateState)
+    private var mouseSequence: Int64 = 0
     private(set) var eventsPosted = 0
     var onFailure: ((String) -> Void)?
     var onPointerReleased: (() -> Void)?
@@ -31,6 +33,7 @@ final class CapturedWindowInput {
         if let down = pointerDown, let target,
            WindowList.onScreen(target.windowID)?.pid == target.pid, let up = down.copy() {
             up.type = .leftMouseUp
+            up.setDoubleValueField(.mouseEventPressure, value: 0)
             up.postToPid(target.pid)
         }
         pointerDown = nil
@@ -61,16 +64,18 @@ final class CapturedWindowInput {
             clear()
             return false
         }
-        if target !== proxy { prepare(proxy, native: native.bounds) }
+        if target !== proxy { prepare(proxy) }
+        if event.type == .leftMouseDown { mouseSequence &+= 1 }
         let point = Self.nativePoint(world: world, tile: proxy.worldRect, native: native.bounds)
         let original: CGEvent
         if source.type == .leftMouseDown || source.type == .leftMouseUp || source.type == .leftMouseDragged {
             // Start a new window event rather than retaining AppKit's packed
             // addressing for the canvas that received the physical press.
-            guard let mouse = CGEvent(mouseEventSource: nil, mouseType: source.type,
+            guard let mouse = CGEvent(mouseEventSource: postedSource, mouseType: source.type,
                                       mouseCursorPosition: point, mouseButton: .left) else { return false }
             mouse.flags = source.flags
             mouse.setIntegerValueField(.mouseEventClickState, value: source.getIntegerValueField(.mouseEventClickState))
+            mouse.setIntegerValueField(.mouseEventNumber, value: mouseSequence)
             original = mouse
         } else {
             guard let copy = source.copy() else { return false }
@@ -80,8 +85,9 @@ final class CapturedWindowInput {
         let local = CGPoint(x: world.x - proxy.worldRect.minX, y: world.y - proxy.worldRect.minY)
         address(original, to: proxy, local: local)
         if event.type == .scrollWheel || event.type == .leftMouseDown,
-           let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
+           let move = CGEvent(mouseEventSource: postedSource, mouseType: .mouseMoved,
                               mouseCursorPosition: original.location, mouseButton: .left) {
+            move.flags = source.flags
             address(move, to: proxy, local: local)
             send(move)
         }
@@ -106,14 +112,14 @@ final class CapturedWindowInput {
         return true
     }
 
-    private func prepare(_ proxy: WindowProxy, native: CGRect) {
+    private func prepare(_ proxy: WindowProxy) {
         clear()
         target = proxy
         preparing = true
         let generation = revision
         let pid = proxy.pid, id = proxy.windowID
         AXQueue.interactive.async { [weak self, weak proxy] in
-            let ax = AXWindow.find(windowID: id, pid: pid, approximateFrame: native)
+            let ax = AXWindow.windowsByID(pid: pid)?[id]
             ax?.raise()
             DispatchQueue.main.async {
                 guard let self, let proxy, self.revision == generation, self.target === proxy else { return }
@@ -123,8 +129,8 @@ final class CapturedWindowInput {
                     return
                 }
                 proxy.ax = ax
-                if let app = NSRunningApplication(processIdentifier: pid), !app.activate(options: []) {
-                    _ = forceAppFront(pid)
+                if let app = NSRunningApplication(processIdentifier: pid) {
+                    if !app.activate(from: .current, options: []), !app.activate(options: []) { _ = forceAppFront(pid) }
                 }
                 self.finishFocus(proxy, generation: generation, until: CACurrentMediaTime() + 0.75)
             }

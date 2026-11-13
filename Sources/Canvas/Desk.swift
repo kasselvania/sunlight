@@ -12,6 +12,7 @@ import AppKit
 @MainActor
 final class Desk {
     private(set) var canvases: [CanvasController] = []
+    let sourceBank: SourceBank?
 
     /// The canvas on the main display (the one with the menu bar).
     var lead: CanvasController { canvases[0] }
@@ -30,7 +31,8 @@ final class Desk {
     /// only when it's moved to another display for real (`CanvasController.leaveEntered`).
     private var owner: [CGWindowID: String] = [:]
 
-    init() {
+    init(sourceBank: SourceBank? = nil) {
+        self.sourceBank = sourceBank ?? (SIPRedesign.enabled ? SourceBank() : nil)
         if Settings.rememberCanvas, let last = LayoutStore.remembered {
             remembered = last
             unclaimed = last.entries
@@ -40,6 +42,11 @@ final class Desk {
         precondition(!displays.isEmpty, "no display")
         for (i, d) in displays.enumerated() { add(d, lead: i == 0) }
         Log.note("Displays: \(displays.map { "\($0.name) \(Int($0.frame.width))×\(Int($0.frame.height)) at \(Int($0.frame.minX)),\(Int($0.frame.minY))" }.joined(separator: "; "))")
+        sourceBank?.onChange = { [weak self] in self?.canvases.forEach { $0.sourceBankChanged() } }
+        sourceBank?.onFailure = { [weak self] text in
+            guard let self else { return }
+            CanvasToast.show(text, in: self.lead.overlay)
+        }
 
         WindowServerEvents.onWindowCreated = { [weak self] id in self?.canvases.forEach { $0.windowServerCreated(id) } }
         WindowServerEvents.onWindowRemoved = { [weak self] _ in self?.canvases.forEach { $0.windowServerRemoved() } }

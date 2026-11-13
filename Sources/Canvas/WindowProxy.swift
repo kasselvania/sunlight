@@ -247,6 +247,7 @@ final class WindowProxy {
 
     private let scale: CGFloat
     private var capture: WindowCapture?
+    private var bankCapture = false
     private var currentBuffer: CVPixelBuffer?  // keeps the IOSurface alive while it's on screen
     /// A captured frame has landed: there is something to show (an arrival waits for it).
     private(set) var hasFrame = false
@@ -264,7 +265,7 @@ final class WindowProxy {
 
     /// True while the window's pixels arrive as a stream. Off whenever the real window may be in front
     /// of the canvas, where the stream's capture pill would show on it.
-    var isStreaming: Bool { capture != nil }
+    var isStreaming: Bool { capture != nil || bankCapture }
     private var failedStarts = 0
     /// Not before this (media time) may a stream be started again after one ended on its own.
     private(set) var retryAfter: CFTimeInterval = 0
@@ -619,7 +620,7 @@ final class WindowProxy {
     /// Streams the window at a level of detail. Only for a window that is behind the canvas (see
     /// `WindowCapture`), and only from the controller's capture pass, which decides the level.
     func startCapture(level: WindowCapture.Level) {
-        guard !usesRealWindow, let window, capture == nil, CACurrentMediaTime() >= retryAfter else { return }
+        guard !bankCapture, !usesRealWindow, let window, capture == nil, CACurrentMediaTime() >= retryAfter else { return }
         capture = WindowCapture(window: window, size: lastRealFrame.size, scale: scale, level: level,
                                 onFrame: { [weak self] buffer in self?.apply(buffer) },
                                 onEnd: { [weak self] error in self?.captureEnded(error) })
@@ -646,6 +647,16 @@ final class WindowProxy {
     func stopCapture() {
         capture?.stop()
         capture = nil
+    }
+
+    func beginBankCapture() { stopCapture(); bankCapture = true }
+    func endBankCapture() { bankCapture = false }
+
+    func applyBankFrame(_ buffer: CVPixelBuffer, crop: CGRect) {
+        guard bankCapture, let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return }
+        show(surface)
+        layer.contentsRect = crop
+        currentBuffer = buffer
     }
 
     /// The stream ended on its own: the window closed, its app quit, Screen Recording was revoked, or
@@ -702,6 +713,7 @@ final class WindowProxy {
     }
 
     private func show(_ contents: Any) {
+        if !bankCapture { crop(toRealSize: lastRealFrame.size) }
         layer.contents = contents
         if !hasFrame {
             hasFrame = true

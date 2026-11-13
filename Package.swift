@@ -13,9 +13,12 @@ let package = Package(
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.6.4"),
     ],
     targets: [
+        .target(name: "SourceDisplay", path: "Sources/SourceDisplay",
+                publicHeadersPath: "include", cSettings: [.unsafeFlags(["-fobjc-arc"])],
+                linkerSettings: [.linkedFramework("AppKit")]),
         .executableTarget(
             name: "Canvas",
-            dependencies: [.product(name: "Sparkle", package: "Sparkle")],
+            dependencies: ["SourceDisplay", .product(name: "Sparkle", package: "Sparkle")],
             path: "Sources/Canvas",
             swiftSettings: [
                 .swiftLanguageMode(.v5)  // strict concurrency as warnings, not errors

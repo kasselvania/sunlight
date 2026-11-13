@@ -4,6 +4,9 @@ import Carbon.HIToolbox
 @main
 enum CanvasApp {
     @MainActor static func main() {
+        if let index = CommandLine.arguments.firstIndex(of: "--sip-bank-host"), index + 1 < CommandLine.arguments.count {
+            SourceBankHost.run(token: CommandLine.arguments[index + 1], recoverOnly: CommandLine.arguments.contains("--sip-bank-recover"))
+        }
         // The guard `Stability.startGuard` starts beside the app: it only waits for the app to exit.
         if let index = CommandLine.arguments.firstIndex(of: "--guard"), index + 1 < CommandLine.arguments.count,
            let parent = pid_t(CommandLine.arguments[index + 1]) {
@@ -73,7 +76,7 @@ enum CanvasApp {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate {
     /// Every display's canvas (`Desk`), which routes each command to the right one.
     private var canvas: Desk?
     /// The ⌃⌥ placement keys (`TileMenu`): global, so they work in a real window too.
@@ -94,6 +97,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private var updater: Updater?
     private var sipStatusItem: NSStatusItem?
     private var sipStatusTimer: Timer?
+    private var sipStopping = false
     /// The menu bar icon: with no Dock icon, every command lives there, in its panel or its right-click menu.
     private var menuBar: MenuBarItem?
     /// Tell Sunlight's bar (⌃⌥Space), made the first time it's asked for.
@@ -252,11 +256,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if SIPRedesign.enabled {
-            sipStatusTimer?.invalidate()
-            canvas?.shutdown()
-            canvas?.remember()
-            SIPRedesign.publish(["phase": "stopped", "pid": getpid(), "app_path": Bundle.main.bundlePath])
-            return .terminateNow
+            guard !sipStopping else { return .terminateLater }
+            sipStopping = true
+            Task { [weak self] in
+                guard let self else { return }
+                let restored = await self.canvas?.sourceBank?.stop() ?? true
+                guard restored else {
+                    self.sipStopping = false
+                    NSApp.reply(toApplicationShouldTerminate: false)
+                    return
+                }
+                self.sipStatusTimer?.invalidate()
+                self.canvas?.shutdown()
+                self.canvas?.remember()
+                SIPRedesign.publish(["phase": "stopped", "pid": getpid(), "app_path": Bundle.main.bundlePath,
+                                     "bank_restored": true])
+                NSApp.reply(toApplicationShouldTerminate: true)
+            }
+            return .terminateLater
         }
         canvas?.shutdown()
         canvas?.remember()
@@ -269,7 +286,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Initial integration uses the real Sunlight canvas, without invoking its
     /// legacy setup, updater, takeover, migration or injected helper.
     private func startSIPCanvas() {
-        let desk = Desk()
+        let bank = SourceBank()
+        Task { [weak self] in
+            await bank.startBeforeDiscovery()
+            self?.finishSIPCanvas(bank)
+        }
+    }
+
+    private func finishSIPCanvas(_ bank: SourceBank) {
+        let desk = Desk(sourceBank: bank)
         canvas = desk
         let menu = NSMenu()
         let appItem = NSMenuItem()
@@ -278,16 +303,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         show.target = self
         let fit = commands.addItem(withTitle: "Fit All Windows", action: #selector(fitSIPCanvas), keyEquivalent: "")
         fit.target = self
+        commands.addItem(withTitle: "Start Window Bank", action: #selector(startSIPBank), keyEquivalent: "").target = self
+        commands.addItem(withTitle: "Return Originals and Stop Bank", action: #selector(stopSIPBank), keyEquivalent: "").target = self
         commands.addItem(.separator())
         commands.addItem(withTitle: "Quit Sunlight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = commands
         menu.addItem(appItem)
+        let windows = NSMenuItem(title: "Windows", action: nil, keyEquivalent: "")
+        let choices = NSMenu(title: "Windows on Canvas")
+        choices.delegate = self
+        windows.submenu = choices
+        menu.addItem(windows)
         NSApp.mainMenu = menu
         let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         status.button?.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: "Sunlight")
         status.menu = commands.copy() as? NSMenu
         sipStatusItem = status
         desk.show()
+        if let error = bank.error { CanvasToast.show(error, in: desk.lead.overlay) }
         sipStatusTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let canvas = self.canvas else { return }
@@ -295,6 +328,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                                      "app_path": Bundle.main.bundlePath,
                                      "screen_recording": CGPreflightScreenCaptureAccess(),
                                      "accessibility": AXIsProcessTrusted(),
+                                     "bank": canvas.sourceBank?.status ?? [:],
                                      "canvases": canvas.canvases.map { $0.redesignStatus }])
             }
         }
@@ -302,8 +336,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc private func showSIPCanvas() { canvas?.show() }
     @objc private func fitSIPCanvas() { canvas?.showCanvas(fitAll: true) }
+    @objc private func startSIPBank() { canvas?.sourceBank?.start() }
+    @objc private func stopSIPBank() { Task { _ = await canvas?.sourceBank?.stop() } }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard SIPRedesign.enabled, menu.title == "Windows on Canvas", let canvas else { return }
+        menu.removeAllItems()
+        for c in canvas.canvases {
+            for p in c.view.proxies.reversed() where p.kind == .window {
+                let item = menu.addItem(withTitle: "\(p.appName) — \(p.title)", action: #selector(showSIPWindow(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = NSNumber(value: p.windowID)
+            }
+        }
+    }
+
+    @objc private func showSIPWindow(_ item: NSMenuItem) {
+        guard let id = (item.representedObject as? NSNumber)?.uint32Value, let canvas,
+              let c = canvas.canvases.first(where: { $0.agentHolds(id) }),
+              let p = c.view.proxies.first(where: { $0.windowID == id }) else { return }
+        c.show()
+        c.view.bringToFront(p)
+    }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        if SIPRedesign.enabled { canvas?.show(); return false }
         if let setup, setup.isShowing {
             setup.showWindow(nil)
         } else if !Settings.sunlightOn {

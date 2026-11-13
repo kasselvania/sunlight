@@ -59,7 +59,9 @@ struct Display: Equatable, Sendable {
     static var all: [Display] {
         let screens = NSScreen.screens
         guard let primary = screens.first else { return [] }
-        return screens.compactMap { Display(screen: $0, primaryHeight: primary.frame.height) }
+        return screens.compactMap { Display(screen: $0, primaryHeight: primary.frame.height) }.filter {
+            !SIPRedesign.enabled || $0.id != SIPRedesign.sourceDisplayID
+        }
     }
 
     /// AppKit's rect (bottom-left origin, y up from the primary display's bottom edge) in Quartz's.
