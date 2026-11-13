@@ -63,7 +63,7 @@ static NSTextField *LabLabel(NSString *text, CGFloat size) {
     }
     NSDictionary *attributes = @{NSFontAttributeName: [NSFont monospacedSystemFontOfSize:21 weight:NSFontWeightMedium],
                                  NSForegroundColorAttributeName: NSColor.labelColor};
-    NSString *text = [NSString stringWithFormat:@"SOURCE %lu\nSequence %06lu\nClicks %lu", (unsigned long)self.sourceIndex,
+    NSString *text = [NSString stringWithFormat:@"ORIGINAL %c\nSequence %06lu\nClicks %lu", (int)('A' + self.sourceIndex),
                       (unsigned long)self.sequence, (unsigned long)self.clicks];
     [text drawAtPoint:NSMakePoint(18, 26) withAttributes:attributes];
     CGFloat travel = MAX(1, self.bounds.size.width - 44);
@@ -77,7 +77,7 @@ static NSWindow *LabSourceWindow(NSUInteger index, NSRect frame) {
     NSWindow *window = [[NSWindow alloc] initWithContentRect:frame
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
         backing:NSBackingStoreBuffered defer:NO];
-    window.title = [NSString stringWithFormat:@"Mirror lab source %lu", (unsigned long)index];
+    window.title = [NSString stringWithFormat:@"ORIGINAL %c — compare with COPY %c in the canvas", (int)('A' + index), (int)('A' + index)];
     window.releasedWhenClosed = NO;
     LabSourceView *view = [[LabSourceView alloc] initWithFrame:NSMakeRect(0, 0, frame.size.width, frame.size.height)];
     view.sourceIndex = index;
@@ -162,14 +162,19 @@ static CALayer *LabMirror(CGWindowID windowID, NSString **failure) {
     }
 }
 
-static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
+static NSDictionary *LabWindowLookup(CGWindowID windowID, pid_t pid) {
     // Query only the window named by our own source process, never the desktop list.
     NSArray *list = CFBridgingRelease(CGWindowListCopyWindowInfo(kCGWindowListOptionIncludingWindow, windowID));
     for (NSDictionary *entry in list) {
         if ([entry[(id)kCGWindowNumber] unsignedIntValue] == windowID &&
-            [entry[(id)kCGWindowOwnerPID] intValue] == pid) return YES;
+            [entry[(id)kCGWindowOwnerPID] intValue] == pid) return @{@"status": @"owner_matched", @"id": @(windowID)};
     }
-    return NO;
+    return @{@"status": list.count == 0 ? @"window_not_listed" : @"owner_not_matched", @"id": @(windowID),
+             @"returned_entries": @(list.count), @"screen_capture_preflight": @(CGPreflightScreenCaptureAccess())};
+}
+
+static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
+    return [LabWindowLookup(windowID, pid)[@"status"] isEqual:@"owner_matched"];
 }
 
 @interface LabCanvas : NSView
@@ -178,6 +183,7 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
 @property NSArray<NSDictionary *> *sources;
 @property NSMutableDictionary<NSNumber *, CALayer *> *mirrors;
 @property NSMutableArray<CALayer *> *chrome;
+@property NSMutableArray<CALayer *> *tiles;
 @property NSPoint lastPoint;
 @property(copy) void (^changed)(void);
 - (BOOL)bindSources:(NSArray<NSDictionary *> *)sources failure:(NSString **)failure;
@@ -193,8 +199,10 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
         self.layer.masksToBounds = YES;
         self.mirrors = [NSMutableDictionary dictionary];
         self.chrome = [NSMutableArray array];
+        self.tiles = [NSMutableArray array];
         self.zoom = 0.9;
         self.pan = CGPointMake(32, 65);
+        [self bindSources:@[] failure:NULL];
     }
     return self;
 }
@@ -208,14 +216,34 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
     }
     for (CALayer *mirror in self.mirrors.allValues) [mirror removeFromSuperlayer];
     for (CALayer *layer in self.chrome) [layer removeFromSuperlayer];
+    for (CALayer *layer in self.tiles) [layer removeFromSuperlayer];
     [self.chrome removeAllObjects];
+    [self.tiles removeAllObjects];
     self.sources = sources;
     self.mirrors = next;
-    for (NSDictionary *source in sources) {
-        CALayer *mirror = self.mirrors[source[@"id"]];
-        [self.layer addSublayer:mirror];
+    for (NSUInteger index = 0; index < 4; index++) {
+        NSDictionary *source = nil;
+        for (NSDictionary *candidate in sources) if ([candidate[@"index"] unsignedIntegerValue] == index) source = candidate;
+        CALayer *tile = [CALayer layer];
+        tile.backgroundColor = [NSColor colorWithWhite:0.20 alpha:1].CGColor;
+        tile.borderColor = [NSColor colorWithWhite:0.5 alpha:1].CGColor;
+        tile.borderWidth = 1;
+        CALayer *mirror = source ? self.mirrors[source[@"id"]] : nil;
+        if (mirror) {
+            [tile addSublayer:mirror];
+        } else {
+            CATextLayer *pending = [CATextLayer layer];
+            pending.string = @"No copy connected";
+            pending.fontSize = 16;
+            pending.alignmentMode = kCAAlignmentCenter;
+            pending.contentsScale = NSScreen.mainScreen.backingScaleFactor;
+            pending.foregroundColor = NSColor.whiteColor.CGColor;
+            [tile addSublayer:pending];
+        }
+        [self.tiles addObject:tile];
+        [self.layer addSublayer:tile];
         CATextLayer *label = [CATextLayer layer];
-        label.string = [NSString stringWithFormat:@"%@ %@", [source[@"index"] intValue] == 0 ? @"SAME APP — CONTROL" : @"OTHER APP — SOURCE", source[@"index"]];
+        label.string = [NSString stringWithFormat:@"COPY %c — %@", (int)('A' + index), index == 0 ? @"same-app control" : @"separate-app original"];
         label.fontSize = 12;
         label.contentsScale = NSScreen.mainScreen.backingScaleFactor;
         label.foregroundColor = NSColor.whiteColor.CGColor;
@@ -228,16 +256,23 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
 - (void)layoutMirrors {
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    NSUInteger i = 0;
-    for (NSDictionary *source in self.sources) {
+    for (NSUInteger i = 0; i < self.tiles.count; i++) {
+        NSDictionary *source = nil;
+        for (NSDictionary *candidate in self.sources) if ([candidate[@"index"] unsignedIntegerValue] == i) source = candidate;
         // Fixed slots describe canvas placement, independent of the sources' native sizes.
         CGFloat x = (i % 2) * 350, y = (i / 2) * 265;
         CGRect frame = CGRectMake(self.pan.x + x * self.zoom, self.pan.y + y * self.zoom,
-                                  [source[@"width"] doubleValue] * self.zoom,
-                                  [source[@"height"] doubleValue] * self.zoom);
-        self.mirrors[source[@"id"]].frame = frame;
+                                  (source ? [source[@"width"] doubleValue] : 290) * self.zoom,
+                                  (source ? [source[@"height"] doubleValue] : 212) * self.zoom);
+        CALayer *tile = self.tiles[i];
+        tile.frame = frame;
+        CALayer *contents = tile.sublayers.firstObject;
+        if ([contents isKindOfClass:CATextLayer.class]) {
+            contents.frame = CGRectMake(0, MAX(0, tile.bounds.size.height / 2 - 12), tile.bounds.size.width, 28);
+        } else {
+            contents.frame = tile.bounds;
+        }
         self.chrome[i].frame = CGRectMake(frame.origin.x, CGRectGetMaxY(frame) + 8, frame.size.width, 20);
-        i++;
     }
     [CATransaction commit];
     if (self.changed) self.changed();
@@ -290,6 +325,14 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
 @property NSArray<NSDictionary *> *sources;
 @property BOOL stopping;
 @property NSUInteger generation;
+@property CFTimeInterval nextBindingAttempt;
+@property BOOL bindingComplete;
+@property NSButton *recordButton;
+@property NSButton *floatButton;
+@property BOOL checkSetup;
+@property BOOL injectedLookupFailure;
+@property NSUInteger bindingAttempts;
+@property BOOL retriedUnchangedManifest;
 @end
 
 @implementation LabViewer
@@ -307,26 +350,31 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
     appItem.submenu = appMenu;
     NSApp.mainMenu = menu;
 
-    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(120, 100, 900, 650)
+    self.window = [[NSWindow alloc] initWithContentRect:NSMakeRect(120, 100, 1000, 650)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable
         backing:NSBackingStoreBuffered defer:NO];
-    self.window.title = @"Sunlight — native live-mirror experiment";
-    self.window.minSize = NSMakeSize(760, 520);
+    self.window.title = @"Sunlight — originals and live copies";
+    self.window.minSize = NSMakeSize(960, 520);
     self.window.releasedWhenClosed = NO;
     self.window.delegate = self;
     NSView *content = self.window.contentView;
-    NSTextField *title = LabLabel(@"Can this Mac draw live windows without Sunlight’s Dock add-on?", 20);
-    NSTextField *help = LabLabel(@"Start the sources. Compare their moving numbers with the tiles. Drag or scroll to pan; pinch or ⌥-scroll to zoom.", 12);
+    NSTextField *title = LabLabel(@"Look for four moving COPIES inside this canvas", 20);
+    NSTextField *help = LabLabel(@"The small separate windows are ORIGINALS. Each box below must show its matching original’s moving number and dot.", 12);
+    self.recordButton = [self button:@"Record what I see…" action:@selector(observe:)];
+    self.recordButton.enabled = NO;
+    self.floatButton = [self button:@"Float COPY B" action:@selector(floatMirror:)];
+    self.floatButton.enabled = NO;
     NSStackView *buttons = [NSStackView stackViewWithViews:@[
         [self button:@"Start sources" action:@selector(start:)],
         [self button:@"Stop" action:@selector(stop:)],
         [self button:@"Fit" action:@selector(fit:)],
-        [self button:@"Float a mirror" action:@selector(floatMirror:)],
-        [self button:@"Record observation…" action:@selector(observe:)]
+        self.floatButton,
+        self.recordButton,
+        [self button:@"Allow window access…" action:@selector(requestAccess:)]
     ]];
     buttons.spacing = 8;
     self.zoomLabel = LabLabel(@"100%", 12);
-    self.status = LabLabel(@"Ready. Starting creates only this experiment’s source windows. Nothing is captured from your other apps.", 12);
+    self.status = LabLabel(@"Click Start sources. Four separate originals will open. The four boxes below must become live copies; moving originals alone do not count. Drag or scroll here to pan; pinch to zoom.", 12);
     self.status.lineBreakMode = NSLineBreakByWordWrapping;
     self.status.maximumNumberOfLines = 3;
     self.canvas = [[LabCanvas alloc] initWithFrame:NSZeroRect];
@@ -359,6 +407,28 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
         [self.status.heightAnchor constraintGreaterThanOrEqualToConstant:34]
     ]];
     [self.window makeKeyAndOrderFront:nil];
+    if (self.checkSetup) {
+        [self start:nil];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+            NSData *data = [NSData dataWithContentsOfFile:[self.directory stringByAppendingPathComponent:@"observation.json"]];
+            NSDictionary *observation = data ? [NSJSONSerialization JSONObjectWithData:data options:0 error:NULL] : @{};
+            NSUInteger foreignCount = 0;
+            for (NSDictionary *source in self.sources) if ([source[@"index"] intValue] != 0) foreignCount++;
+            BOOL passed = [observation[@"kind"] isEqual:@"incomplete_setup"] && self.retriedUnchangedManifest && foreignCount == 3;
+            NSDictionary *result = @{@"kind": @"setup_regression_check", @"passed": @(passed),
+                @"initial_observation_kind": observation[@"kind"] ?: @"missing",
+                @"retried_unchanged_manifest": @(self.retriedUnchangedManifest), @"binding_attempts": @(self.bindingAttempts),
+                @"foreign_source_count": @(foreignCount), @"rendering_result": @"unverified"};
+            NSData *output = [NSJSONSerialization dataWithJSONObject:result options:NSJSONWritingPrettyPrinted error:NULL];
+            fwrite(output.bytes, 1, output.length, stdout);
+            fputc('\n', stdout);
+            fflush(stdout);
+            [self stop:nil];
+            // NSApplication's normal terminate route exits with zero. This CLI
+            // check must preserve a failing result for the caller.
+            exit(passed ? EXIT_SUCCESS : EXIT_FAILURE);
+        });
+    }
 }
 - (void)start:(id)sender {
     (void)sender;
@@ -373,6 +443,11 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
     }
     LabWriteJSON(LabInspection(), [self.directory stringByAppendingPathComponent:@"inspection.json"]);
     self.lastManifest = nil;
+    self.bindingComplete = NO;
+    self.nextBindingAttempt = 0;
+    self.bindingAttempts = 0;
+    self.retriedUnchangedManifest = NO;
+    self.injectedLookupFailure = NO;
     self.generation++;
     NSUInteger generation = self.generation;
     NSString *parent = [NSBundle.mainBundle.bundlePath stringByDeletingLastPathComponent];
@@ -383,9 +458,11 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
     task.standardOutput = NSFileHandle.fileHandleWithNullDevice;
     task.standardError = NSFileHandle.fileHandleWithNullDevice;
     self.fixture = task;
+    NSString *runDirectory = self.directory;
     __weak LabViewer *weakSelf = self;
     task.terminationHandler = ^(NSTask *finished) {
-        (void)finished;
+        LabWriteJSON(@{@"termination_status": @(finished.terminationStatus), @"termination_reason": @(finished.terminationReason)},
+                     [runDirectory stringByAppendingPathComponent:@"fixture-exit.json"]);
         dispatch_async(dispatch_get_main_queue(), ^{
             LabViewer *viewer = weakSelf;
             if (!viewer || viewer.generation != generation) return;
@@ -403,7 +480,7 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
     NSRect screen = NSScreen.mainScreen.visibleFrame;
     self.control = LabSourceWindow(0, NSMakeRect(NSMaxX(screen) - 315, NSMaxY(screen) - 235, 290, 190));
     self.control.delegate = self;
-    self.status.stringValue = @"Binding one same-app control and three windows from the separate fixture process. Rendering is still unverified.";
+    self.status.stringValue = @"Starting originals A–D. COPY A is the control; copies B, C and D must connect to the separate app.";
     self.poll = [NSTimer timerWithTimeInterval:0.1 repeats:YES block:^(NSTimer *timer) {
         (void)timer;
         [weakSelf refreshSources];
@@ -427,16 +504,31 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
         return;
     }
     NSString *manifestText = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
-    if ([manifestText isEqual:self.lastManifest]) return;
+    BOOL unchanged = [manifestText isEqual:self.lastManifest];
+    if (unchanged && self.bindingComplete) return;
+    if (unchanged && CACurrentMediaTime() < self.nextBindingAttempt) return;
+    self.nextBindingAttempt = CACurrentMediaTime() + 1;
+    self.bindingAttempts++;
+    if (unchanged) self.retriedUnchangedManifest = YES;
     NSMutableArray *sources = [NSMutableArray array];
+    NSMutableArray *lookups = [NSMutableArray array];
     if (self.control.visible) {
         [sources addObject:@{@"id": @(self.control.windowNumber), @"width": @(self.control.frame.size.width),
                              @"height": @(self.control.frame.size.height), @"index": @0}];
     }
     for (NSDictionary *source in manifest[@"sources"]) {
         if (![source isKindOfClass:NSDictionary.class] || ![source[@"id"] isKindOfClass:NSNumber.class] ||
-            ![source[@"width"] isKindOfClass:NSNumber.class] || ![source[@"height"] isKindOfClass:NSNumber.class] ||
-            !LabWindowBelongsTo([source[@"id"] unsignedIntValue], self.fixture.processIdentifier)) {
+            ![source[@"width"] isKindOfClass:NSNumber.class] || ![source[@"height"] isKindOfClass:NSNumber.class]) {
+            [lookups addObject:@{@"status": @"invalid_source_description"}];
+            continue;
+        }
+        // The finite regression check makes the first lookup fail, then uses the
+        // real window server. Normal launches never inject a failure.
+        NSDictionary *lookup = self.checkSetup && !self.injectedLookupFailure
+            ? @{@"status": @"injected_initial_lookup_unavailable", @"id": source[@"id"]}
+            : LabWindowLookup([source[@"id"] unsignedIntValue], self.fixture.processIdentifier);
+        [lookups addObject:lookup];
+        if (![lookup[@"status"] isEqual:@"owner_matched"]) {
             // A source can close between publication and the query. Never bind its ID to another owner.
             continue;
         }
@@ -452,15 +544,34 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
         return;
     }
     self.sources = sources;
+    self.injectedLookupFailure = YES;
     self.lastManifest = manifestText;
-    [self.canvas fit];
-    self.status.stringValue = @"Layers configured; this does not prove pixels are live. Check the moving counters, then record what you see.";
+    NSUInteger foreignCount = 0;
+    for (NSDictionary *source in sources) if ([source[@"index"] intValue] != 0) foreignCount++;
+    self.bindingComplete = sources.count == 4 && foreignCount == 3;
+    self.recordButton.enabled = YES;
+    self.floatButton.enabled = self.bindingComplete;
+    LabWriteJSON(@{@"source_count": @(sources.count), @"foreign_source_count": @(foreignCount),
+        @"expected_foreign_source_count": @3, @"setup_complete": @(self.bindingComplete), @"lookups": lookups,
+        @"screen_capture_preflight": @(CGPreflightScreenCaptureAccess())},
+        [self.directory stringByAppendingPathComponent:@"binding.json"]);
+    if (!unchanged) [self.canvas fit];
+    if (self.bindingComplete) {
+        self.status.stringValue = @"4 copies connected. Check INSIDE the canvas: A, B, C and D must all show moving numbers and dots, even as you drag or pinch here.";
+    } else {
+        self.status.stringValue = [NSString stringWithFormat:@"SETUP INCOMPLETE: %lu of 3 separate-app copies connected. Empty boxes are not successful mirrors. Screen Recording permission: %@. Missing sources will retry; no permission is requested automatically.",
+            (unsigned long)foreignCount, CGPreflightScreenCaptureAccess() ? @"granted" : @"not granted"];
+    }
+    if (self.checkSetup && self.bindingAttempts == 1) [self observe:nil];
 }
 - (void)clearMirrors {
     [self.poll invalidate];
     self.poll = nil;
     [self.canvas bindSources:@[] failure:NULL];
     self.sources = @[];
+    self.bindingComplete = NO;
+    self.recordButton.enabled = NO;
+    self.floatButton.enabled = NO;
     [self.floating close];
     self.floating = nil;
     self.control.delegate = nil;
@@ -481,10 +592,32 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
     }
 }
 - (void)fit:(id)sender { (void)sender; [self.canvas fit]; }
+- (void)requestAccess:(id)sender {
+    (void)sender;
+    if (CGPreflightScreenCaptureAccess()) {
+        self.lastManifest = nil;
+        [self refreshSources];
+        return;
+    }
+    NSAlert *alert = [NSAlert new];
+    alert.messageText = @"Allow this viewer to identify the separate app’s windows?";
+    alert.informativeText = @"This opens macOS’s normal Screen Recording permission request. The lab still uses only its own synthetic windows. If macOS asks you to quit and reopen the viewer after granting access, do that, then click Start sources again. SIP stays enabled.";
+    [alert addButtonWithTitle:@"Open macOS permission request"];
+    [alert addButtonWithTitle:@"Cancel"];
+    [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
+        if (response == NSAlertFirstButtonReturn) {
+            CGRequestScreenCaptureAccess();
+            self.lastManifest = nil;
+            [self refreshSources];
+        }
+    }];
+}
 - (void)floatMirror:(id)sender {
     (void)sender;
-    if (!self.fixture.running || self.sources.count < 2) return;
-    NSDictionary *source = self.sources[1];
+    if (!self.fixture.running || !self.bindingComplete) return;
+    NSDictionary *source = nil;
+    for (NSDictionary *candidate in self.sources) if ([candidate[@"index"] intValue] == 1) source = candidate;
+    if (!source) return;
     if (!LabWindowBelongsTo([source[@"id"] unsignedIntValue], self.fixture.processIdentifier)) return;
     [self.floating close];
     NSString *failure = nil;
@@ -507,22 +640,30 @@ static BOOL LabWindowBelongsTo(CGWindowID windowID, pid_t pid) {
 }
 - (void)observe:(id)sender {
     (void)sender;
-    if (!self.directory || !self.fixture.running || self.sources.count == 0) return;
+    if (!self.directory || !self.fixture.running) return;
+    if (!self.bindingComplete) {
+        NSString *path = [self.directory stringByAppendingPathComponent:@"observation.json"];
+        NSUInteger foreignCount = 0;
+        for (NSDictionary *source in self.sources) if ([source[@"index"] intValue] != 0) foreignCount++;
+        LabWriteJSON(@{@"kind": @"incomplete_setup", @"observation": @"cross_app_rendering_unverified",
+            @"source_count": @(self.sources.count), @"foreign_source_count": @(foreignCount),
+            @"expected_foreign_source_count": @3, @"inspection": LabInspection()}, path);
+        self.status.stringValue = @"Recorded an incomplete setup. The app has not connected all three separate-app originals, so there is no cross-app success result to record yet.";
+        return;
+    }
     NSAlert *alert = [NSAlert new];
     NSUInteger generation = self.generation;
-    NSUInteger count = self.sources.count;
-    alert.messageText = @"What did the live mirrors show?";
-    alert.informativeText = @"Compare the numbers and moving dots with the real source windows, including while you pan and zoom. This records your observation, not an automatic performance result.";
-    NSString *allTitle = count == 4 ? @"All four live" : @"All visible mirrors live";
-    for (NSString *title in @[allTitle, @"Only control live", @"Blank / frozen", @"Cancel"]) [alert addButtonWithTitle:title];
+    alert.messageText = @"What moved INSIDE the dark canvas?";
+    alert.informativeText = @"Look at COPY A, COPY B, COPY C and COPY D inside this app. Each should show its original’s changing number and moving dot while you pan or zoom. Moving original windows outside this app do not count.";
+    for (NSString *title in @[@"All four copies stayed live", @"Only COPY A stayed live", @"Copies blank / frozen", @"Not sure", @"Cancel"]) [alert addButtonWithTitle:title];
     [alert beginSheetModalForWindow:self.window completionHandler:^(NSModalResponse response) {
         NSInteger index = response - NSAlertFirstButtonReturn;
-        if (index < 0 || index > 2) return;
-        if (self.generation != generation || !self.fixture.running || self.stopping) {
+        if (index < 0 || index > 3) return;
+        if (self.generation != generation || !self.fixture.running || self.stopping || !self.bindingComplete) {
             self.status.stringValue = @"The run ended before the observation was recorded.";
             return;
         }
-        NSString *observation = @[@"all_bound_sources_live", @"same_app_only", @"blank_or_frozen"][index];
+        NSString *observation = @[@"all_four_copies_live", @"same_app_only", @"blank_or_frozen", @"inconclusive"][index];
         NSUInteger foreignCount = 0;
         for (NSDictionary *source in self.sources) if ([source[@"index"] intValue] != 0) foreignCount++;
         NSString *path = [self.directory stringByAppendingPathComponent:@"observation.json"];
@@ -560,7 +701,8 @@ int main(int argc, const char *argv[]) {
             return 0;
         }
         BOOL fixture = argc == 4 && strcmp(argv[1], "--fixture") == 0;
-        if (argc > 1 && !fixture) { fprintf(stderr, "Usage: NativeMirrorLab [--inspect | --fixture DIRECTORY TOKEN]\n"); return 2; }
+        BOOL checkSetup = argc == 2 && strcmp(argv[1], "--check-setup") == 0;
+        if (argc > 1 && !fixture && !checkSetup) { fprintf(stderr, "Usage: NativeMirrorLab [--inspect | --check-setup | --fixture DIRECTORY TOKEN]\n"); return 2; }
         [NSApplication sharedApplication];
         if (fixture) {
             [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
@@ -571,6 +713,7 @@ int main(int argc, const char *argv[]) {
             [NSApp run];
         } else {
             __attribute__((objc_precise_lifetime)) LabViewer *delegate = [LabViewer new];
+            delegate.checkSetup = checkSetup;
             NSApp.delegate = delegate;
             [NSApp run];
         }

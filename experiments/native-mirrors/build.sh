@@ -3,7 +3,7 @@ set -euo pipefail
 
 lab_root="$(cd "$(dirname "$0")/../.." && pwd)"
 lab_source="$lab_root/experiments/native-mirrors"
-lab_output="$lab_root/build/native-mirrors"
+lab_output="${MIRROR_LAB_BUILD_DIR:-$lab_root/build/native-mirrors}"
 mkdir -p "$lab_output"
 
 # Deliberately independent of Sunlight's package script, bootstrap and Dock helper.

@@ -40,7 +40,7 @@ runtime class/selector inspection, and `experiments/native-mirrors/build.sh`.
 
 ## What is still unknown
 
-No GUI application has been launched for this experiment at this checkpoint.
+At the initial build-only checkpoint, no GUI application had been launched.
 Live same-process or cross-process pixels have not been accepted. Floating
 mirrors, pan/zoom with live sources, source closure and interactive cleanup are
 not qualified by the successful build.
@@ -52,8 +52,56 @@ product parity has been measured.
 
 ## First decision
 
-Open the built viewer and start its synthetic sources. If foreign mirrors stay
-live while the canvas moves, investigate source-window state support and native
-input next. If only the same-app control works, or all mirrors fail, record that
-result and move to the virtual-display design. Do not respond by optimizing the
-demo's click-through gesture.
+Open the built viewer and start its synthetic sources. First require all four
+sources to connect. If foreign copies then stay live while the canvas moves,
+investigate source-window state support and native input next. Missing bindings
+are a setup defect to resolve before assessing the compositor. If connected
+foreign copies fail to render, retain that result when deciding whether to move
+to virtual displays. Do not respond by optimizing the demo's click-through
+gesture.
+
+## First user trial and correction
+
+The user launched the initial viewer and then clarified that the distinction
+between originals and copies was unclear. The saved observation contained
+`source_count: 1` and `foreign_source_count: 0`, despite the fixture manifest
+publishing three separate-app windows. The viewer's Screen Recording preflight
+was false in this GUI run. This does not establish the cause of the failed
+lookups; those were not logged by the initial version.
+
+**No live cross-app rendering result is accepted from that trial.** Even the
+same-app animation was not unambiguously distinguished from its original.
+
+Two preparation defects were identified in the code:
+
+- A rejected ownership lookup was silently omitted and the unchanged source
+  manifest prevented a later retry.
+- The observation dialog allowed "all visible mirrors live" with only the
+  same-app control connected. That was insufficient evidence for this question.
+
+The correction keeps four labelled COPY A–D boxes visible, names the originals
+to match, reports incomplete bindings, retries unresolved ownership checks,
+logs their outcomes, and prevents an incomplete setup from recording cross-app
+success. The normal macOS permission request is available only by explicit
+user action. No permission is changed automatically.
+
+The finite `--check-setup` regression check passed on this Mac: the first
+injected lookup failure produced an `incomplete_setup` observation, the
+unchanged manifest was retried, and the second binding attempt verified all
+three foreign owners (`source_count: 4`). This command-line run reported Screen
+Recording preflight true; it is not equivalent to the original GUI launch's
+permission context. The check opened only the synthetic lab windows and closed
+them after three seconds. The fixture exit record reports termination by the
+viewer (SIGTERM).
+
+Raw check records are under the local temporary run directory ending
+`sunlight-mirrorlab-4CD09E1E-67FF-4B11-ACE4-09E379EACF2A`: `binding.json`,
+`observation.json` and `fixture-exit.json`. The check explicitly reports
+`rendering_result: unverified`. The clarified GUI still needs a visual result.
+
+The final check also exercised a missing fixture bundle: it reported
+`passed: false`, zero foreign sources and exit status 1. The successful retry
+case returned exit status 0. Their raw outputs are retained in
+`build/native-mirrors-clarified/setup-check.json` and
+`build/native-mirrors-clarified/missing-fixture-check.json`. Both continue to
+report rendering as unverified.
