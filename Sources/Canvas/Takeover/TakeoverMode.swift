@@ -86,18 +86,21 @@ final class TakeoverMode {
         }
     }
 
-    /// The SIP-enabled profile: the foreground watcher alone, so a Dock click, ⌘Tab, Spotlight or an
-    /// app activating itself goes through the canvas's own handling (`foreignActivation`) instead of a
-    /// real window popping up apart from its tile. No key tap yet (Sunlight's switcher and hotkeys
-    /// come with the rest of its keyboard handling), no Spaces watcher, nothing changed on the system.
-    func startWatcherOnly() {
+    /// The SIP-enabled profile: the key tap (Sunlight's ⌘Tab switcher, the Mission Control key, F11, ⌘?)
+    /// and the foreground watcher, so a Dock click, ⌘Tab, Spotlight or an app activating itself goes
+    /// through the canvas's own handling (`foreignActivation`). As light mode, nothing is changed on the
+    /// system (no consent, no Dock/Finder preferences, no login item), and the Spaces watcher stays off:
+    /// its Desktop merge needs the Dock add-on.
+    func startSIPProfile() {
         guard !isRunning else { return }
+        keyTap.start()
         watcher.start()
         isRunning = true
-        Log.note("Takeover: SIP profile — foreground watcher only, nothing changed on the system")
+        Log.note("Takeover: SIP profile — key tap and foreground watcher, nothing changed on the system")
     }
 
-    func stopWatcherOnly() {
+    func stopSIPProfile() {
+        keyTap.stop()
         watcher.stop()
         isRunning = false
     }
@@ -210,7 +213,7 @@ final class TakeoverMode {
         inputSuspended = false
         keyTap.start()
         watcher.start()
-        spaces.start()
+        if !SIPRedesign.enabled { spaces.start() }
         Log.note("Takeover: keys and watching resumed")
     }
 

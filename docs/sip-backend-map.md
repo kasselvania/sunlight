@@ -274,6 +274,35 @@ tile on the canvas and so resize unbanked real windows too.
 | Dock click on the front app while typing through its tile | **Not testable with the fixture.** Sunlight matches Dock icons to apps by bundle path, and the fixture is a bare executable. The rest of that path is the one checked above. |
 | Adoption at launch | **Pass.** All three windows were found on the second bank at launch and adopted into slots. |
 
+## Step 4 status (run live 2026-11-13)
+
+`App.finishSIPCanvas` now builds Sunlight's own shell, as `startCanvas` does: the main menu, the menu
+bar icon and its panel, the ⌃⌥ hotkeys, four-finger pan (`TrackpadPan`), the experimental-feature
+observer, signal handlers that go through the quit path, and `TakeoverMode.startSIPProfile()` (the key
+tap and the foreground watcher). The development lab menu and its extra status item are gone.
+
+Left out of the SIP profile, and guarded so nothing can reach them: setup (`showSetup`), the
+updater, the Dock add-on (`loadLiveWindows`, `reloadLiveWindows`), takeover's consent and system
+preferences (`takeOverTheMac`, `releaseTheMac`), uninstall, and the Spaces watcher, whose Desktop
+merge needs the add-on (also kept off when input resumes). The panel hides Set Up, Check for Updates,
+Reload Live Windows and Take Over / Release (`MenuBarPanelModel.sipProfile`) and says "On · window
+bank, SIP on". Settings has no Live Windows pane, no takeover switch and no Uninstall. The app menu
+and the icon's right-click menu carry Start Window Bank and Return Windows and Stop Window Bank.
+
+| Check | Result |
+|---|---|
+| Launch | **Pass.** Sunlight's menus (app, Edit, Layouts, Window), sun icon, minimap; log: key tap installed, four-finger pan following one multitouch device, takeover SIP profile. |
+| ⌃⌥← with the pointer over a banked tile | **Pass.** "Tile: … → Left Half"; the bank made room, then the window took 1703 × 1401. |
+| ⌘Tab | **Pass.** Sunlight's switcher opened (6 apps, 8 windows) with the canvas previewing the highlighted app; Escape cancelled it; nothing switched. |
+| Mission Control key | Routed (`Key: missionControl`). A tap on the canvas goes back into the last window (none here), as Sunlight intends. The hold, which picks the window under the pointer, was not exercised: it could have entered one of the owner's real windows. |
+| Settings (⌘,) | **Pass.** Tabs: General, Canvas, Background, Windows, Motion, How to use, Experimental. General shows the SIP-profile note, no takeover switch, no Uninstall. |
+| Menu bar panel | **Pass.** "On · window bank, SIP on"; More lists only Settings… and Quit Sunlight. |
+| Quit | **Pass.** Windows returned, journal removed, two display profiles, ColorSync idle. |
+| Four-finger pan | Started (log above); not exercised: synthetic events can't drive the multitouch framework. Needs a real trackpad. |
+
+Unchanged from the earlier SIP builds: the app keeps a Dock icon (`.regular` activation policy),
+where Sunlight proper has none.
+
 ## Not verified by this map
 
 - Runtime behaviour of any row. This map comes from source reading only.

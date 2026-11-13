@@ -6,6 +6,7 @@
 //   dclick <x> <y>             double-click
 //   click <x> <y>              single click
 //   dockitem <title>           centre of a Dock icon (global top-left), by its title
+//   key <code> <mods|-> <press|down|up>   a key with modifiers (cmd,ctrl,opt,shift), e.g. key 123 ctrl,opt press
 //   mouse                      current pointer location
 //   moveto <x> <y>             move pointer
 //   menu <pid> <x> <y> <a>[/<b>]  right-click, then press menu item a (and b in its submenu) of process pid
@@ -92,6 +93,19 @@ case "dockitem":
         print(f.midX, f.midY); exit(0)
     }
     print("not found"); exit(1)
+case "key":
+    var flags: CGEventFlags = []
+    for m in a[3].split(separator: ",") {
+        switch m { case "cmd": flags.insert(.maskCommand); case "ctrl": flags.insert(.maskControl)
+        case "opt": flags.insert(.maskAlternate); case "shift": flags.insert(.maskShift); default: break }
+    }
+    let src = CGEventSource(stateID: .hidSystemState)
+    func send(_ down: Bool) {
+        let e = CGEvent(keyboardEventSource: src, virtualKey: CGKeyCode(a[2])!, keyDown: down)!
+        e.flags = flags
+        e.post(tap: .cghidEventTap)
+    }
+    switch a[4] { case "down": send(true); case "up": send(false); default: send(true); usleep(40_000); send(false) }
 case "mouse":
     let l = CGEvent(source: nil)!.location
     print(l.x, l.y)

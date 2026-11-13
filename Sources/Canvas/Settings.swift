@@ -842,7 +842,8 @@ private final class SettingsTabController: NSTabViewController {
         super.init(nibName: nil, bundle: nil)
         tabStyle = .toolbar
         transitionOptions = []
-        for tab in Tab.allCases { addTabViewItem(item(for: tab)) }
+        // The SIP-enabled profile has no Live Windows pane: its renderer and setup are the Dock add-on's.
+        for tab in Tab.allCases where !(SIPRedesign.enabled && tab == .liveWindows) { addTabViewItem(item(for: tab)) }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -1226,18 +1227,23 @@ private struct GeneralPane: View {
                     VStack(alignment: .leading, spacing: 3) {
                         HStack(spacing: 8) {
                             Text(versionTitle).font(.headline)
-                            StatusPill(text: takenOver ? "Taking over the Mac" : "Not taking over", colour: takenOver ? .green : .secondary)
+                            if !SIPRedesign.enabled {
+                                StatusPill(text: takenOver ? "Taking over the Mac" : "Not taking over", colour: takenOver ? .green : .secondary)
+                            }
                         }
-                        Text("Replaces the Dock, ⌘Tab and Mission Control. Off puts them back.")
+                        Text(SIPRedesign.enabled ? "SIP-enabled profile: windows live in the window bank; nothing on this Mac's settings is changed."
+                             : "Replaces the Dock, ⌘Tab and Mission Control. Off puts them back.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 8)
-                    Toggle("Take over the Mac", isOn: model.bind({ model.isTakenOver?() == true }, { on in
-                        if on { model.onTakeOver?() } else { model.onRelease?() }
-                    }))
-                    .labelsHidden()
+                    if !SIPRedesign.enabled {
+                        Toggle("Take over the Mac", isOn: model.bind({ model.isTakenOver?() == true }, { on in
+                            if on { model.onTakeOver?() } else { model.onRelease?() }
+                        }))
+                        .labelsHidden()
+                    }
                 }
                 .padding(.vertical, 4)
             }
@@ -1267,14 +1273,14 @@ private struct GeneralPane: View {
                     SectionHeader(title: "Updates")
                 }
             }
-            Section {
+            if !SIPRedesign.enabled { Section {
                 LabeledContent {
                     Button("Uninstall…") { model.onUninstall?() }
                 } label: {
                     RowLabel(title: "Uninstall Sunlight",
                              subtitle: "Undoes setup and moves Sunlight to the Trash.")
                 }
-            }
+            } }
         }
         .formStyle(.grouped)
         .toggleStyle(.switch)

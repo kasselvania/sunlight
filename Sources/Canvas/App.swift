@@ -76,7 +76,7 @@ enum CanvasApp {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     /// Every display's canvas (`Desk`), which routes each command to the right one.
     private var canvas: Desk?
     /// The ⌃⌥ placement keys (`TileMenu`): global, so they work in a real window too.
@@ -95,7 +95,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     var reviewScenario: SetupReview.Scenario?
     private var reviewController: SetupWizardController?
     private var updater: Updater?
-    private var sipStatusItem: NSStatusItem?
     private var sipStatusTimer: Timer?
     private var sipStopping = false
     /// The menu bar icon: with no Dock icon, every command lives there, in its panel or its right-click menu.
@@ -267,7 +266,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                     return
                 }
                 self.sipStatusTimer?.invalidate()
-                self.takeover?.stopWatcherOnly()
+                self.takeover?.stopSIPProfile()
                 self.canvas?.shutdown()
                 self.canvas?.remember()
                 SIPRedesign.publish(["phase": "stopped", "pid": getpid(), "app_path": Bundle.main.bundlePath,
@@ -294,38 +293,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
     }
 
+    /// Sunlight's own shell around the SIP-enabled canvas, as `startCanvas` builds it: the main menu,
+    /// the menu bar icon and its panel, the ⌃⌥ hotkeys, four-finger pan, the key tap (⌘Tab, Mission
+    /// Control, F11) and the foreground watcher. Left out: setup, the updater, the Dock add-on, takeover's
+    /// consent and system preferences, Desktop merging and uninstall, all of which belong to the
+    /// SIP-weakened product.
     private func finishSIPCanvas(_ bank: SourceBank) {
         let desk = Desk(sourceBank: bank)
         canvas = desk
-        let menu = NSMenu()
-        let appItem = NSMenuItem()
-        let commands = NSMenu(title: "Sunlight")
-        let show = commands.addItem(withTitle: "Show Canvas", action: #selector(showSIPCanvas), keyEquivalent: "")
-        show.target = self
-        let fit = commands.addItem(withTitle: "Fit All Windows", action: #selector(fitSIPCanvas), keyEquivalent: "")
-        fit.target = self
-        commands.addItem(withTitle: "Start Window Bank", action: #selector(startSIPBank), keyEquivalent: "").target = self
-        commands.addItem(withTitle: "Return Originals and Stop Bank", action: #selector(stopSIPBank), keyEquivalent: "").target = self
-        commands.addItem(.separator())
-        commands.addItem(withTitle: "Quit Sunlight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appItem.submenu = commands
-        menu.addItem(appItem)
-        let windows = NSMenuItem(title: "Windows", action: nil, keyEquivalent: "")
-        let choices = NSMenu(title: "Windows on Canvas")
-        choices.delegate = self
-        windows.submenu = choices
-        menu.addItem(windows)
-        NSApp.mainMenu = menu
-        let status = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        status.button?.image = NSImage(systemSymbolName: "sun.max", accessibilityDescription: "Sunlight")
-        status.menu = commands.copy() as? NSMenu
-        sipStatusItem = status
-        desk.show()
-        // Activation from outside the canvas (Dock, ⌘Tab, Spotlight) reaches the canvas's own handling.
+        installMenu()
+        desk.onCustomiseBackground = { [weak self] in self?.showSettings(tab: .background) }
+        desk.onHowToUse = { [weak self] in self?.showInstructions(chapter: nil) }
+        desk.onDisplaysChanged = { [weak self] in self?.experimentalFeaturesChanged() }
+        menuBar = makeMenuBar(for: desk)
+        menuBar?.model.sipProfile = true
+        if Settings.sunlightOn { installHotkeys(for: desk) }
+        NotificationCenter.default.addObserver(forName: Settings.experimentalFeaturesDidChange, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.experimentalFeaturesChanged() }
+        }
+        let pan = TrackpadPan { [weak desk] phase in
+            guard Settings.sunlightOn else { return }
+            desk?.trackpadPan(phase)
+        }
+        pan.start()
+        pan.setActive(Settings.sunlightOn)
+        trackpadPan = pan
         let takeover = TakeoverMode(canvas: desk)
         self.takeover = takeover
         desk.takeover = takeover
-        takeover.startWatcherOnly()
+        takeover.startSIPProfile()
+        // SIGINT/SIGTERM go through the quit path, which returns the banked windows.
+        installSignalHandlers()
+        if Settings.sunlightOn {
+            desk.show()
+        } else {
+            desk.setPaused(true)
+            takeover.suspendInput()
+        }
         if let error = bank.error { CanvasToast.show(error, in: desk.lead.overlay) }
         sipStatusTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -340,30 +344,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
     }
 
-    @objc private func showSIPCanvas() { canvas?.show() }
-    @objc private func fitSIPCanvas() { canvas?.showCanvas(fitAll: true) }
     @objc private func startSIPBank() { canvas?.sourceBank?.start() }
     @objc private func stopSIPBank() { Task { _ = await canvas?.sourceBank?.stop() } }
-
-    func menuNeedsUpdate(_ menu: NSMenu) {
-        guard SIPRedesign.enabled, menu.title == "Windows on Canvas", let canvas else { return }
-        menu.removeAllItems()
-        for c in canvas.canvases {
-            for p in c.view.proxies.reversed() where p.kind == .window {
-                let item = menu.addItem(withTitle: "\(p.appName) — \(p.title)", action: #selector(showSIPWindow(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = NSNumber(value: p.windowID)
-            }
-        }
-    }
-
-    @objc private func showSIPWindow(_ item: NSMenuItem) {
-        guard let id = (item.representedObject as? NSNumber)?.uint32Value, let canvas,
-              let c = canvas.canvases.first(where: { $0.agentHolds(id) }),
-              let p = c.view.proxies.first(where: { $0.windowID == id }) else { return }
-        c.show()
-        c.view.bringToFront(p)
-    }
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         if SIPRedesign.enabled { canvas?.show(); return false }
@@ -522,7 +504,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         model.takeoverRunning = takeover?.isRunning == true
         model.canCheckForUpdates = updater?.canCheck == true
         model.updateVersion = updater?.foundVersion
-        model.rendering = canvas?.renderer == .realWindows ? .live : Settings.previewMode ? .preview : .pictures
+        model.rendering = SIPRedesign.enabled ? .bank : canvas?.renderer == .realWindows ? .live : Settings.previewMode ? .preview : .pictures
         model.layouts = MenuBarPanelModel.layoutRows(LayoutStore.layouts.map(\.name))
         if let setupStatus {
             let progress = SetupFlow.progress(for: setupStatus, mac: mac)
@@ -540,6 +522,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         }
         add("How to Use…", #selector(showInstructions(_:)), "?")
         add("Settings…", #selector(showSettings(_:)), ",")
+        if SIPRedesign.enabled {
+            menu.addItem(.separator())
+            add("Start Window Bank", #selector(startSIPBank))
+            add("Return Windows and Stop Window Bank", #selector(stopSIPBank))
+            menu.addItem(.separator())
+            menu.addItem(NSMenuItem(title: "Quit Sunlight", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+            return menu
+        }
         add("Set Up Sunlight…", #selector(showSetup))
         add("Check for Updates…", #selector(checkForUpdates))
         add("Reload Live Windows…", #selector(reloadLiveWindows))
@@ -622,6 +612,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
             item.target = self
             return item
+        }
+        if SIPRedesign.enabled {
+            return [
+                item("Settings…", #selector(showSettings(_:)), ","),
+                item("How to Use Sunlight", #selector(showInstructions(_:)), "?"),
+                item("Change Background…", #selector(showBackgroundSettings)),
+                item("Add Widgets…", #selector(addWidgets)),
+                item("Minimap", #selector(toggleMinimap)),
+                item("Desktop Files", #selector(toggleDesktopFloor)),
+                captureMethodMenuItem(),
+                .separator(),
+                item("Start Window Bank", #selector(startSIPBank)),
+                item("Return Windows and Stop Window Bank", #selector(stopSIPBank)),
+            ]
         }
         return [
             item("Settings…", #selector(showSettings(_:)), ","),
@@ -847,6 +851,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     }
 
     @objc private func showSetup() {
+        guard !SIPRedesign.enabled else { return }   // the SIP-weakened product's
         setupController().show(startingLive: false)
     }
 
@@ -872,6 +877,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     // MARK: Uninstall
 
     @objc private func showUninstall() {
+        guard !SIPRedesign.enabled else { return }   // the SIP-weakened product's
         uninstallController().showWindow(nil)
     }
 
@@ -930,6 +936,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// renderer may still be probing, and a request that only set the renderer would be refused by
     /// preview mode's quiet path and lost.
     private func loadLiveWindows() {
+        guard !SIPRedesign.enabled else { return }   // the SIP-weakened product's
         guard let canvas else { return }
         if Settings.renderer != .realWindows {
             Settings.renderer = .realWindows
@@ -991,17 +998,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
     /// Loads the live-window addition into the Dock with an administrator prompt, after a Dock restart
     /// unloaded it and no passwordless reload is set up.
     @objc private func reloadLiveWindows() {
+        guard !SIPRedesign.enabled else { return }   // the SIP-weakened product's
         canvas?.reloadAddition(interactive: true)
     }
 
     /// The question is a sheet on the canvas, so the canvas comes forward with it.
     @objc private func takeOverTheMac() {
+        guard !SIPRedesign.enabled else { return }   // the SIP-weakened product's
         canvas?.showCanvas(fitAll: false)
         takeover?.askForConsent()
     }
 
     /// Puts the Mac back and opts out; the login item goes too.
     @objc private func releaseTheMac() {
+        guard !SIPRedesign.enabled else { return }   // the SIP-weakened product's
         takeover?.revert(reason: .leaveMode)
         NSApp.terminate(nil)
     }

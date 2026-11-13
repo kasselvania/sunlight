@@ -23,7 +23,7 @@ final class MenuBarPanelModel: ObservableObject {
     }
 
     /// How windows reach the canvas, for the line under the name.
-    enum Rendering: Equatable { case live, pictures, preview }
+    enum Rendering: Equatable { case live, pictures, preview, bank }
 
     /// The line under "Sunlight", and the one thing it may ask for.
     struct Caption: Equatable {
@@ -79,6 +79,8 @@ final class MenuBarPanelModel: ObservableObject {
     @Published var updateVersion: String?
     @Published var takeoverRunning = false
     @Published var canCheckForUpdates = false
+    /// The SIP-enabled profile: no setup, updater, Dock add-on or takeover rows (`SIPRedesign`).
+    @Published var sipProfile = false
     var actions = Actions()
 
     // MARK: What is enabled when
@@ -105,6 +107,7 @@ final class MenuBarPanelModel: ObservableObject {
         case .live: return Caption(text: "On · live windows")
         case .pictures: return Caption(text: "On · screen capture")
         case .preview: return Caption(text: "On · preview")
+        case .bank: return Caption(text: "On · window bank, SIP on")
         }
     }
 
@@ -335,15 +338,17 @@ private struct MoreScreen: View {
                     }
                     SectionLabel("Sunlight")
                     Row(title: "Settings…", detail: "⌘,", enabled: true) { dismiss(); model.actions.showSettings() }
-                    Row(title: setupTitle, detail: nil, enabled: true) { dismiss(); model.actions.setUp() }
-                    Row(title: "Check for Updates…", detail: model.updateVersion, enabled: model.canCheckForUpdates) {
-                        dismiss(); model.actions.checkForUpdates()
-                    }
-                    Row(title: "Reload Live Windows…", detail: nil, enabled: model.canReload) { dismiss(); model.actions.reloadLiveWindows() }
-                    if model.takeoverRunning {
-                        Row(title: "Release the Mac…", detail: nil, enabled: true) { dismiss(); model.actions.release() }
-                    } else {
-                        Row(title: "Take Over the Mac…", detail: nil, enabled: model.canTakeOver) { dismiss(); model.actions.takeOver() }
+                    if !model.sipProfile {
+                        Row(title: setupTitle, detail: nil, enabled: true) { dismiss(); model.actions.setUp() }
+                        Row(title: "Check for Updates…", detail: model.updateVersion, enabled: model.canCheckForUpdates) {
+                            dismiss(); model.actions.checkForUpdates()
+                        }
+                        Row(title: "Reload Live Windows…", detail: nil, enabled: model.canReload) { dismiss(); model.actions.reloadLiveWindows() }
+                        if model.takeoverRunning {
+                            Row(title: "Release the Mac…", detail: nil, enabled: true) { dismiss(); model.actions.release() }
+                        } else {
+                            Row(title: "Take Over the Mac…", detail: nil, enabled: model.canTakeOver) { dismiss(); model.actions.takeOver() }
+                        }
                     }
                     Divider().padding(.vertical, 4).padding(.horizontal, 6)
                     Row(title: "Quit Sunlight", detail: "⌘Q", enabled: true) { dismiss(); model.actions.quit() }
