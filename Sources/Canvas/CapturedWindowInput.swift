@@ -95,18 +95,24 @@ final class CapturedWindowInput {
             point = CGPoint(x: world.x + pressOffset.dx, y: world.y + pressOffset.dy)
         }
         if event.type == .leftMouseUp { pressOffset = nil; pressGrab = nil }
+        // A menu, pop-up list or other window of the app's above the normal level under the point (on the
+        // bank its pixels fall inside the tile's crop): the event is that window's. Addressed to the
+        // tile's own window, a click on an open menu read as a click outside it and closed it unchosen.
+        let over = Self.windowInFront(of: proxy.windowID, pid: proxy.pid, at: point)
+        let windowID = over?.id ?? proxy.windowID
         // Window-relative, against where the window is now (equal to the tile's when nothing moved).
-        let local = CGPoint(x: point.x - native.bounds.minX, y: point.y - native.bounds.minY)
+        let origin = over?.bounds.origin ?? native.bounds.origin
+        let local = CGPoint(x: point.x - origin.x, y: point.y - origin.y)
         if event.type == .scrollWheel {
             // Hover scrolling has its own receiver. It never changes the app
             // or window selected for typing, including across app boundaries.
             guard let scroll = source.copy() else { return false }
             scroll.location = point
-            address(scroll, to: proxy, local: local)
+            address(scroll, to: proxy, window: windowID, local: local)
             if let move = CGEvent(mouseEventSource: postedSource, mouseType: .mouseMoved,
                                   mouseCursorPosition: point, mouseButton: .left) {
                 move.flags = source.flags
-                address(move, to: proxy, local: local)
+                address(move, to: proxy, window: windowID, local: local)
                 _ = post(move, to: proxy)
             }
             return post(scroll, to: proxy)
@@ -128,6 +134,21 @@ final class CapturedWindowInput {
             }
         }
         guard target === proxy else { return false }
+        // An open menu (or other raised window) of the app's under the press: menus track the real
+        // pointer, which is over the canvas on the physical display, not over the menu on the bank, so
+        // a posted click read as one outside it and closed it unchosen (measured 2026-11-13). The item
+        // under the click is pressed through Accessibility on release instead, and nothing is posted.
+        if let over, over.layer > 0,
+           [.leftMouseDown, .leftMouseDragged, .leftMouseUp].contains(event.type) {
+            if event.type != .leftMouseDragged {
+                Log.note("Captured input: \(event.type == .leftMouseDown ? "press" : "release") over raised window \(over.id) (layer \(over.layer)) at \(NSStringFromPoint(point))")
+            }
+            if event.type == .leftMouseUp { Self.pressRaised(pid: proxy.pid, at: point) }
+            return true
+        }
+        if let over, event.type == .leftMouseDown || event.type == .leftMouseUp {
+            Log.note("Captured input: \(event.type == .leftMouseDown ? "press" : "release") to window \(over.id) in front of \(proxy.windowID) at local \(NSStringFromPoint(local))")
+        }
         if event.type == .leftMouseDown {   // after `prepare`, which clears the previous press
             pressOffset = CGVector(dx: native.bounds.minX - proxy.worldRect.minX, dy: native.bounds.minY - proxy.worldRect.minY)
             pressGrab = (world, proxy.worldRect.origin)
@@ -147,24 +168,60 @@ final class CapturedWindowInput {
             copy.location = point
             original = copy
         }
-        address(original, to: proxy, local: local)
+        address(original, to: proxy, window: windowID, local: local)
         if event.type == .leftMouseDown,
            let move = CGEvent(mouseEventSource: postedSource, mouseType: .mouseMoved,
                               mouseCursorPosition: original.location, mouseButton: .left) {
             move.flags = source.flags
-            address(move, to: proxy, local: local)
+            address(move, to: proxy, window: windowID, local: local)
             send(move)
         }
         send(original)
         return target === proxy
     }
 
-    private func address(_ event: CGEvent, to proxy: WindowProxy, local: CGPoint) {
-        event.setIntegerValueField(Self.windowNumberField, value: Int64(proxy.windowID))
+    private func address(_ event: CGEvent, to proxy: WindowProxy, window: CGWindowID, local: CGPoint) {
+        event.setIntegerValueField(Self.windowNumberField, value: Int64(window))
         event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(proxy.pid))
-        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(proxy.windowID))
-        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(proxy.windowID))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointer, value: Int64(window))
+        event.setIntegerValueField(.mouseEventWindowUnderMousePointerThatCanHandleThisEvent, value: Int64(window))
         Self.setWindowLocation?(event, local)
+    }
+
+    /// Presses what Accessibility finds at a native point in `pid`'s windows: a menu item, or a button,
+    /// checkbox or radio button in a raised window. Off the main thread; anything else is left alone.
+    nonisolated static func pressRaised(pid: pid_t, at point: CGPoint) {
+        AXQueue.interactive.async {
+            let app = AXUIElementCreateApplication(pid)
+            var element: AXUIElement?
+            let hit = AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &element)
+            guard hit == .success, let element else {
+                Log.note("Captured input: nothing at \(NSStringFromPoint(point)) in pid \(pid) for Accessibility (\(hit.rawValue))")
+                return
+            }
+            var role: CFTypeRef?
+            AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role)
+            let pressable: Set<String> = [kAXMenuItemRole, kAXButtonRole, kAXCheckBoxRole, kAXRadioButtonRole,
+                                          kAXPopUpButtonRole, kAXMenuButtonRole]
+            guard let r = role as? String, pressable.contains(r) else {
+                Log.note("Captured input: \(role as? String ?? "?") at \(NSStringFromPoint(point)) isn't pressable; left alone")
+                return
+            }
+            let result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+            Log.note("Captured input: pressed \(r) in a raised window of pid \(pid) (\(result.rawValue))")
+        }
+    }
+
+    /// Another window of `pid` in front of the tile's own at a native point: a menu, pop-up list or
+    /// popover above the normal level, or a sheet, alert or panel at it. On the bank its pixels fall in
+    /// the tile's crop, so a press there is meant for it. Nil once the listing (front to back) reaches
+    /// the tile's window.
+    nonisolated static func windowInFront(of parent: CGWindowID, pid: pid_t, at point: CGPoint) -> WindowInfo? {
+        for w in WindowList.onScreen() {
+            if w.id == parent { return nil }
+            if w.pid == pid, w.bounds.contains(point) { return w }
+        }
+        return nil
     }
 
     func key(_ event: NSEvent) -> Bool {

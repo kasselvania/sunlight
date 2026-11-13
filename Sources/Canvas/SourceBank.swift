@@ -260,13 +260,16 @@ final class SourceBank {
         }
     }
 
-    /// The window's corner radius from one SkyLight capture's alpha, for its tile's clip and shadow.
-    /// Once per size; a window whose capture fails keeps the canvas's standard radius.
+    /// The window's corner radius from one ScreenCaptureKit screenshot's alpha, for its tile's clip and
+    /// shadow. Once per size; a window whose capture fails keeps the canvas's standard radius.
+    /// ScreenCaptureKit, not SkyLight's capture: macOS asked the owner to allow "bypassing the system
+    /// private window picker" (a legacy-capture consent prompt) on the launches that measured through
+    /// SkyLight (2026-11-13).
     private func measureCorners(_ id: CGWindowID) {
-        guard let entry = entries[id], let p = entry.proxy else { return }
+        guard let entry = entries[id], let p = entry.proxy, let window = p.window else { return }
         let size = entry.record.native.size
         cornersMeasured[id] = size
-        OneShotCapture.capture(windowID: id, backing: true) { [weak self, weak p] image in
+        OneShotCapture.capture(window, seam: true) { [weak self, weak p] image in
             guard let self, let p, let image, self.entries[id]?.proxy === p,
                   let alpha = SourceBankGeometry.alpha(of: image),
                   let radius = SourceBankGeometry.cornerRadius(alpha: alpha, width: image.width, height: image.height,

@@ -621,7 +621,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                 item("Add Widgets…", #selector(addWidgets)),
                 item("Minimap", #selector(toggleMinimap)),
                 item("Desktop Files", #selector(toggleDesktopFloor)),
-                captureMethodMenuItem(),
                 .separator(),
                 item("Start Window Bank", #selector(startSIPBank)),
                 item("Return Windows and Stop Window Bank", #selector(stopSIPBank)),

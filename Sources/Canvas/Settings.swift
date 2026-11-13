@@ -598,6 +598,10 @@ enum Settings {
     /// and otherwise to ScreenCaptureKit, so an unavailable private path leaves today's behaviour intact.
     static var captureMethod: CaptureMethod {
         get {
+            // The SIP profile's windows live on source displays; SkyLight's capture of them brought up
+            // macOS's "bypass the system private window picker" consent prompt (2026-11-13), where
+            // ScreenCaptureKit, under the ordinary Screen Recording grant, did not.
+            if SIPRedesign.enabled { return .screenCaptureKit }
             if let raw = defaults.string(forKey: captureMethodKey), let method = CaptureMethod(rawValue: raw) {
                 return method
             }

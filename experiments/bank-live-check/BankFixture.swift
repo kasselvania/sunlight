@@ -45,6 +45,21 @@ final class Delegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] { [.flexibleSpace] }
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? { nil }
 
+    @objc func showSheet(_ sender: NSButton) {
+        guard let window = sender.window else { return }
+        let alert = NSAlert()
+        alert.messageText = "Sheet on \(window.title)"
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        alert.beginSheetModal(for: window) { response in
+            FileHandle.standardError.write("sheet \(response == .alertFirstButtonReturn ? "OK" : "Cancel")\n".data(using: .utf8)!)
+        }
+    }
+
+    @objc func chose(_ sender: NSPopUpButton) {
+        FileHandle.standardError.write("chose \(sender.titleOfSelectedItem ?? "?")\n".data(using: .utf8)!)
+    }
+
     func applicationDidFinishLaunching(_ note: Notification) {
         let screen = NSScreen.main!.visibleFrame
         for (i, name) in ["A", "B", "C"].enumerated() {
@@ -56,6 +71,16 @@ final class Delegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
             let v = Pulse(frame: NSRect(origin: .zero, size: w.frame.size))
             v.label = name
             w.contentView = v
+            // A pop-up menu: where macOS opens it, and whether choosing works, for a banked window.
+            let popup = NSPopUpButton(frame: NSRect(x: 24, y: 170, width: 220, height: 30), pullsDown: false)
+            popup.addItems(withTitles: ["\(name) first", "\(name) second", "\(name) third"])
+            popup.target = self
+            popup.action = #selector(chose(_:))
+            v.addSubview(popup)
+            // A sheet: a window of the app's at the normal level, attached over this one.
+            let sheet = NSButton(title: "Sheet…", target: self, action: #selector(showSheet(_:)))
+            sheet.frame = NSRect(x: 260, y: 170, width: 100, height: 30)
+            v.addSubview(sheet)
             w.makeKeyAndOrderFront(nil)
             windows.append(w); views.append(v)
         }

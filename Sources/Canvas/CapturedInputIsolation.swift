@@ -42,9 +42,21 @@ final class CapturedInputIsolation {
             }
             if event.getIntegerValueField(.eventSourceUserData) == d.mark { return Unmanaged.passUnretained(event) }
             let navigation = type == .scrollWheel || type.rawValue == UInt32(NSEvent.EventType.gesture.rawValue)
-            guard navigation || type == .leftMouseDragged || type == .leftMouseUp else { return Unmanaged.passUnretained(event) }
-            let number = event.getIntegerValueField(CGEventField(rawValue: 51)!)
-            let foreign = number > 0 && number <= Int64(UInt32.max) && d.windows.withLock { $0.contains(CGWindowID(number)) }
+            guard navigation || type == .leftMouseDown || type == .leftMouseDragged || type == .leftMouseUp else { return Unmanaged.passUnretained(event) }
+            let field = CGEventField(rawValue: 51)!
+            let number = event.getIntegerValueField(field)
+            var foreign = number > 0 && number <= Int64(UInt32.max) && d.windows.withLock { $0.contains(CGWindowID(number)) }
+            // A press grabbed by the app's own open menu (or other raised window) on a source display:
+            // addressed to that window, though the real pointer is over the canvas on the physical
+            // display, nowhere near it. It is the canvas's: re-addressed, so the canvas's tile input
+            // presses the menu item (`CapturedWindowInput`). Measured 2026-11-13: the first click on an
+            // open menu went to the menu's tracking, unseen by the canvas, and nothing was chosen.
+            if !foreign, type != .scrollWheel, number > 0, number <= Int64(UInt32.max),
+               let grabbed = WindowList.onScreen(CGWindowID(number)), grabbed.layer > 0,
+               !grabbed.bounds.contains(event.location), let canvas = d.windows.withLock({ $0.first }) {
+                event.setIntegerValueField(field, value: Int64(canvas))
+                foreign = true
+            }
             if foreign, MainActor.assumeIsolated({ d.canvasEvent(event) }) { return nil }
             return Unmanaged.passUnretained(event)
         }

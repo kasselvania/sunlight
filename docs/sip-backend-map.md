@@ -334,6 +334,42 @@ Messages) **27.3 pt**, as macOS 26 draws them. Screenshots of tile corners show 
 corner with no bank wallpaper. The measurement's step is about 1.7 pt (one pixel on the diagonal at
 2×). True per-pixel alpha (translucent windows, irregular shapes) is still not recovered.
 
+## Step 5b status: menus and sheets in tiles (run live 2026-11-13, partly)
+
+What happens with a banked window's pop-up menu or sheet, from a fixture with an `NSPopUpButton` and
+an `NSAlert` sheet:
+
+- **Seen.** A menu opens as a layer-101 window, and a sheet as a layer-0 window, on the bank over
+  their parent. Inside the parent's frame both are in the parent's crop and show on its tile. A menu
+  or popover that extends past the parent's frame is cut at the tile's edge (not yet drawn as an
+  overlay). Sunlight's own attached tile for a sheet drew a wrong picture (a shrunken parent) over
+  the tile; attached tiles over a banked parent are now neither streamed nor drawn, and presses on
+  them go to the parent as before.
+- **Sheets: clicks work.** `CapturedWindowInput.windowInFront` finds the app's window in front of the
+  tile's at the press, and the press is addressed to it. OK and Cancel each worked through the tile.
+- **Menus: keyboard worked from the start** (Down, Return reach the frontmost app). **Clicks did
+  not**: a posted click addressed to the menu closed it unchosen, because menu tracking follows the
+  real pointer, which is on the physical display. A press over a raised window of the app is now not
+  posted; on release, the item under it is pressed through Accessibility
+  (`AXUIElementCopyElementAtPosition` at the native point, then `AXPress` for menu items, buttons,
+  checkboxes, radio buttons). Live: correct item chosen every time the click reached Sunlight.
+- **The first click on an open menu was often lost**: the app's menu tracking grabbed it, so the canvas
+  never saw it. `CapturedInputIsolation` now also takes presses addressed to one of the app's raised
+  windows while the real pointer is nowhere near that window, re-addresses them to the canvas, and the
+  canvas handles them as its own press. Live after this change: two of three single clicks chose the
+  item; the third needed a second click (the lost press left no trace; not yet diagnosed).
+- Hover highlighting inside a menu does not follow the pointer (menus track the real pointer).
+  Right-click over a tile shows Sunlight's own menu, as in Sunlight proper.
+
+**Consent prompts.** During these runs macOS showed "Sunlight Canvas Lab is requesting to bypass the
+system private window picker and directly access your screen and audio" six times, never answered
+(the owner was away). The first came on the run that first measured corners through SkyLight
+captures of banked windows; one-shots now use ScreenCaptureKit in the SIP profile
+(`Settings.captureMethod`), and the next launch added none, but later launches still did. The bank
+feed's Core Graphics display stream is the remaining legacy-capture API. Options: answer Allow (macOS
+remembers it for a while), or move the feed to ScreenCaptureKit's display stream and re-measure
+throughput, which the Core Graphics path was chosen for in build 8.
+
 ## Not verified by this map
 
 - Runtime behaviour of any row. This map comes from source reading only.

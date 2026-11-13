@@ -412,6 +412,14 @@ final class CanvasController {
             }
             guard let native = NSEvent(cgEvent: event) else { return false }
             switch event.type {
+            case .leftMouseDown:
+                // A press an app's open menu grabbed (`CapturedInputIsolation`): the canvas's own, at the
+                // real pointer, as if it had come here.
+                let local = self.window.convertPoint(fromScreen: NSEvent.mouseLocation)
+                guard let press = NSEvent.mouseEvent(with: .leftMouseDown, location: local, modifierFlags: native.modifierFlags,
+                                                     timestamp: native.timestamp, windowNumber: self.window.windowNumber, context: nil,
+                                                     eventNumber: native.eventNumber, clickCount: max(1, native.clickCount), pressure: 1) else { return false }
+                self.view.mouseDown(with: press)
             case .scrollWheel: self.view.scrollWheel(with: native)
             case .leftMouseDragged, .leftMouseUp:
                 let point = CGPoint(x: event.location.x - self.display.frame.minX, y: event.location.y - self.display.frame.minY)
@@ -5983,7 +5991,8 @@ final class CanvasController {
             return v.isNull ? 0 : v.width * v.height
         }
         let candidates = view.proxies.compactMap { p -> (id: ObjectIdentifier, area: CGFloat, streaming: Bool, capped: Bool)? in
-            guard p.kind == .window, !p.inFront, desk?.sourceBank?.contains(p.windowID) != true else { return nil }   // banked: the shared feed
+            guard p.kind == .window, !p.inFront, desk?.sourceBank?.contains(p.windowID) != true,
+                  !(p.attachedTo.map { desk?.sourceBank?.contains($0) == true } ?? false) else { return nil }   // banked, or over a banked parent: the shared feed
             if case .far = p.viewport { return nil }
             let area = max(onScreen(camera.toScreen(p.worldRect)), target.map { onScreen($0.toScreen(p.worldRect)) } ?? 0)
             return (ObjectIdentifier(p), area, p.isStreaming, p.capped)
@@ -5998,6 +6007,16 @@ final class CanvasController {
                 p.inFront = false
                 p.capped = false
                 streaming += 1
+                continue
+            }
+            // A sheet, alert or panel attached to a banked window: its pixels are in the parent's crop
+            // (it sits over the parent on the bank), and its own stream drew the wrong picture over the
+            // tile. Neither streamed nor drawn while the parent is banked; presses go to the parent
+            // (`CanvasView.proxy(at:)`), whose input finds the child in front (`windowInFront`).
+            let overBanked = p.attachedTo.map { desk?.sourceBank?.contains($0) == true } ?? false
+            if p.attachedTo != nil { p.layer.isHidden = overBanked }
+            if overBanked {
+                p.stopCapture()
                 continue
             }
             if p.inFront {
