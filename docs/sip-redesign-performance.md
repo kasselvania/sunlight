@@ -20,6 +20,15 @@ Measured implementation: commit `3b7ab3aee4a61099cc60c29b5cfa70884c563840`.
 See the [build 8 findings](../experiments/virtual-display-canvas/LOCAL_FINDINGS.md#capture-performance-build-8)
 for artifact identity, measurements, failed candidates and recovery evidence.
 
+## Build 12 measurement (2026-11-13)
+
+All of the owner's windows banked plus three fixture windows animating at 100 Hz: the bank feed
+holding the animated windows delivered **100.0 frames/s at 6144 × 4096 px** in three consecutive
+5 s samples, on a 100 Hz display, with WindowServer about 50% CPU. Windows outside the bank now keep
+Sunlight's own capture policy (eight streams, 30/15/10 fps); uncapped, they had held the bank to
+about 23 frames/s with WindowServer saturated. Details and the breakdown are in
+[sip-backend-map.md](sip-backend-map.md#throughput-breakdown).
+
 ## Where to optimize later
 
 Search the source for `SIP PERFORMANCE` to find the matching comments. These are

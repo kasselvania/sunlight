@@ -167,6 +167,19 @@ cap. In normal use, where every window that fits is banked, there are few or no 
 `SIP_MAX_STREAMS=0` row is the closest measurement to that, and build 8 measured 93 frames/s with
 all windows banked. Banking the owner's real windows was not re-measured in this run.
 
+**Real-world check, everything banked (2026-11-13, owner away).** With no `--sip-bank-only`, all
+eight windows were banked (the owner's T3, Zen, Messages, Mail and Claude, plus the three fixture
+windows), with nothing skipped, refused or streamed per window. [sample.py](../experiments/bank-live-check/sample.py), three 5 s samples:
+
+| Bank feed | Frames/s | Notes |
+|---|---|---|
+| Display holding the animated fixture windows (and Claude, Mail, Messages) | **100.0, 99.8, 100.0** at 6144 × 4096 px | the display's full refresh rate; fixture drew 100/s |
+| Display holding T3 and Zen | 16–29 | follows those apps' own updates (T3 redraws as replies stream); same with the fixture paused |
+
+WindowServer about 50% and Sunlight about 17% CPU while animating; about 20% and 5% with the
+fixture paused. After quit, all five of the owner's windows were back at their exact original
+frames; the journal was removed, two display profiles, ColorSync idle.
+
 Found and fixed during the run: a build-11 journal record for a window on another Space blocked
 every launch ("restoration identity is unavailable"), because Accessibility can't reach such a
 window. A record whose window is already on a physical display is now retired with a log line.
