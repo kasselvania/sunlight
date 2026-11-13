@@ -11,11 +11,11 @@ final class SourceBankHost: @unchecked Sendable {
     private let token: String
     private var journal: BankJournal
     private var handles: [CGWindowID: AXWindow] = [:]
-    private var display: SLSourceDisplay?
-    private var bounds = CGRect.zero
+    private var displays: [SLSourceDisplay] = []
+    private var banks: [CGDirectDisplayID: CGRect] = [:]
     private var physical: [CGRect] = []
     private var physicalIDs = Set<CGDirectDisplayID>()
-    private var displayID: CGDirectDisplayID = 0
+    private var displayIDs: [CGDirectDisplayID] = []
     private var stopping = false
     private var health: Timer?
     private var disconnectSignal: DispatchSourceSignal?
@@ -48,37 +48,42 @@ final class SourceBankHost: @unchecked Sendable {
         physical = screens.map(\.visible)
         physicalIDs = Set(screens.map(\.id))
         let fps = SIPRedesign.frameRate(displayID: screens.first?.id ?? CGMainDisplayID())
-        autoreleasepool { display = SLSourceDisplay(width: 3072, height: 2048, scale: 2, refreshRate: Double(fps)) }
-        guard let display, !physicalIDs.contains(display.displayID) else {
-            send(["event": "failed", "error": "Could not create the temporary window-bank display."]); exit(1)
+        // Create the bank set before the canvas discovers physical displays.
+        // Shared feeds replace the expensive per-window overflow streams.
+        for _ in 0..<2 {
+            guard let display = autoreleasepool(invoking: { SLSourceDisplay(width: 3072, height: 2048, scale: 2, refreshRate: Double(fps)) }),
+                  !physicalIDs.contains(display.displayID), !displayIDs.contains(display.displayID) else {
+                send(["event": "failed", "error": "Could not create the temporary window-bank displays."]); exit(1)
+            }
+            displays.append(display); displayIDs.append(display.displayID)
         }
-        displayID = display.displayID
-        journal.displayID = displayID
-        SIPRedesign.sourceDisplayID = displayID
+        journal.displayIDs = displayIDs
+        SIPRedesign.sourceDisplayIDs = Set(displayIDs)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.displayReady() }
     }
 
     @MainActor private func displayReady(attempt: Int = 0) {
-        bounds = CGDisplayBounds(displayID)
-        let mode = CGDisplayCopyDisplayMode(displayID)
-        let screen = NSScreen.screens.first {
-            ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == displayID
-        }
-        let scale = mode.map { Double($0.pixelWidth) / max(1, bounds.width) } ?? screen?.backingScaleFactor ?? 0
-        guard SourceBankGeometry.activeDisplayIDs().contains(displayID),
-              bounds.width >= 1024, bounds.height >= 768, scale >= 1.9,
-              !physical.contains(where: { $0.intersects(bounds) }), CGDisplayMirrorsDisplay(displayID) == 0 else {
-            if attempt < 30 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.displayReady(attempt: attempt + 1) }
-                return
+        let active = SourceBankGeometry.activeDisplayIDs()
+        var descriptions: [[String: Any]] = []
+        for id in displayIDs {
+            let bounds = CGDisplayBounds(id)
+            let screen = NSScreen.screens.first { ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == id }
+            let scale = CGDisplayCopyDisplayMode(id).map { Double($0.pixelWidth) / max(1, bounds.width) } ?? screen?.backingScaleFactor ?? 0
+            guard active.contains(id), bounds.width >= 1024, bounds.height >= 768, scale >= 1.9,
+                  !physical.contains(where: { $0.intersects(bounds) }), CGDisplayMirrorsDisplay(id) == 0,
+                  !banks.contains(where: { $0.key != id && $0.value.intersects(bounds) }) else {
+                if attempt < 30 {
+                    banks.removeAll()
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { self.displayReady(attempt: attempt + 1) }
+                    return
+                }
+                send(["event": "failed", "error": "The window-bank displays did not settle as separate Retina displays."]); exit(1)
             }
-            send(["event": "failed", "error": "The window-bank display did not settle as a separate Retina display.",
-                  "bounds": NSStringFromRect(bounds), "scale": scale,
-                  "active": CGDisplayIsActive(displayID), "online": CGDisplayIsOnline(displayID),
-                  "mirrors": CGDisplayMirrorsDisplay(displayID)]); exit(1)
+            banks[id] = bounds
+            descriptions.append(["id": id, "bounds": NSStringFromRect(bounds), "scale": scale])
         }
-        send(["event": "ready", "display_id": displayID, "bounds": NSStringFromRect(bounds), "scale": scale,
-              "host_pid": getpid(), "physical_ids": physicalIDs.sorted()])
+        send(["event": "ready", "displays": descriptions, "host_pid": getpid(), "host_bundle_id": Bundle.main.bundleIdentifier ?? "",
+              "host_path": Bundle.main.bundlePath, "physical_ids": physicalIDs.sorted()])
         DispatchQueue.global(qos: .userInitiated).async {
             while let line = readLine() { self.queue.sync { self.receive(line) } }
             self.queue.async { self.finish(reason: "canvas exited") }
@@ -89,8 +94,8 @@ final class SourceBankHost: @unchecked Sendable {
                 let screens = Display.all
                 let ids = Set(screens.map(\.id))
                 guard !ids.isEmpty else { return }  // display sleep is not removal
-                let changed = ids != self.physicalIDs || !SourceBankGeometry.activeDisplayIDs().contains(self.displayID)
-                    || CGDisplayBounds(self.displayID) != self.bounds
+                let changed = ids != self.physicalIDs || !Set(self.displayIDs).isSubset(of: SourceBankGeometry.activeDisplayIDs())
+                    || self.banks.contains(where: { CGDisplayBounds($0.key) != $0.value })
                 if changed {
                     let physical = screens.map(\.visible)
                     self.queue.async { self.physical = physical; self.finish(reason: "display configuration changed") }
@@ -103,7 +108,7 @@ final class SourceBankHost: @unchecked Sendable {
         let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
         source.setEventHandler { [weak self] in
             guard let self else { return }
-            self.display = nil
+            if !self.displays.isEmpty { self.displays.removeLast() }
             self.queue.async { self.finish(reason: "source display disconnected") }
         }
         source.resume()
@@ -139,11 +144,16 @@ final class SourceBankHost: @unchecked Sendable {
               !ax.isFullScreen, !ax.isMinimized, let original = ax.frame else {
             throw failure("This window cannot be parked with a restorable Accessibility identity.")
         }
-        guard let slot = SourceBankGeometry.slot(size: listed.bounds.size, display: bounds, occupied: journal.records.map(\.native)) else {
-            throw failure("This window does not fit in the current source bank; it remains on its original display.")
+        let placement = displayIDs.compactMap { id -> (CGDirectDisplayID, CGRect)? in
+            guard let bounds = banks[id], let slot = SourceBankGeometry.slot(size: listed.bounds.size, display: bounds,
+                occupied: journal.records.filter { $0.displayID == id }.map(\.native)) else { return nil }
+            return (id, slot)
+        }.first
+        guard let (bankID, slot) = placement, let bankBounds = banks[bankID] else {
+            throw failure("This window does not fit in the source banks; it remains on its original display.")
         }
         var record = BankRecord(id: id, process: process, originalAX: original, originalCG: listed.bounds,
-                                document: ax.document?.absoluteString, native: slot)
+                                document: ax.document?.absoluteString, native: slot, displayID: bankID)
         // The journal is durable before the first placement. The host also keeps
         // the actual AX handle, so a reused window number cannot inherit it.
         journal.records.append(record)
@@ -152,7 +162,7 @@ final class SourceBankHost: @unchecked Sendable {
         let offset = CGPoint(x: original.minX - listed.bounds.minX, y: original.minY - listed.bounds.minY)
         let asked = CGPoint(x: slot.minX + offset.x, y: slot.minY + offset.y)
         do {
-            guard ax.setPosition(asked), let actual = awaitFrame(id, pid: pid, matching: { self.bounds.contains($0) && abs($0.minX - slot.minX) < 3 && abs($0.minY - slot.minY) < 3 }) else {
+            guard ax.setPosition(asked), let actual = awaitFrame(id, pid: pid, matching: { bankBounds.contains($0) && abs($0.minX - slot.minX) < 3 && abs($0.minY - slot.minY) < 3 }) else {
                 throw failure("The app refused its source-bank position.")
             }
             record.native = actual
@@ -241,13 +251,13 @@ final class SourceBankHost: @unchecked Sendable {
         DispatchQueue.main.async {
             self.health?.invalidate(); self.health = nil
             self.disconnectSignal?.cancel(); self.disconnectSignal = nil
-            self.display = nil
+            self.displays.removeAll()
             self.waitForRemoval(reason: reason)
         }
     }
 
     @MainActor private func waitForRemoval(reason: String) {
-        guard displayID == 0 || !SourceBankGeometry.activeDisplayIDs().contains(displayID) else {
+        guard Set(displayIDs).isDisjoint(with: SourceBankGeometry.activeDisplayIDs()) else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.waitForRemoval(reason: reason) }
             return
         }
@@ -263,7 +273,7 @@ final class SourceBankHost: @unchecked Sendable {
         guard !previous.host.isLive else { throw failure("The preceding window-bank host is still restoring its windows.") }
         // If both processes ended, macOS has removed the old display. Recover
         // only the recorded window number in the same process lifetime.
-        physical = CGActivePhysicalFrames(excluding: previous.displayID)
+        physical = CGActivePhysicalFrames(excluding: Set(previous.displayIDs ?? [previous.displayID].compactMap { $0 }))
         journal.records = previous.records
         for record in previous.records { _ = try restore(record.id) }
     }
@@ -289,8 +299,8 @@ final class SourceBankHost: @unchecked Sendable {
     }
 }
 
-private func CGActivePhysicalFrames(excluding source: CGDirectDisplayID?) -> [CGRect] {
+private func CGActivePhysicalFrames(excluding sources: Set<CGDirectDisplayID>) -> [CGRect] {
     var ids = [CGDirectDisplayID](repeating: 0, count: 32), count: UInt32 = 0
     guard CGGetActiveDisplayList(32, &ids, &count) == .success else { return [] }
-    return ids.prefix(Int(count)).filter { $0 != source }.map { CGDisplayBounds($0) }
+    return ids.prefix(Int(count)).filter { !sources.contains($0) }.map { CGDisplayBounds($0) }
 }

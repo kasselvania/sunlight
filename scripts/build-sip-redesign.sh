@@ -14,8 +14,9 @@ sip_bundle="$sip_output/SunlightCanvasLab.bundle"
 mkdir -p "$sip_output"
 swift build --package-path "$sip_root" --scratch-path "$sip_scratch" -c debug
 sip_binary_dir="$(swift build --package-path "$sip_root" --scratch-path "$sip_scratch" -c debug --show-bin-path)"
-mkdir -p "$sip_bundle/Contents/MacOS" "$sip_bundle/Contents/Resources" "$sip_bundle/Contents/Frameworks"
+mkdir -p "$sip_bundle/Contents/Helpers" "$sip_bundle/Contents/MacOS" "$sip_bundle/Contents/Resources" "$sip_bundle/Contents/Frameworks"
 cp "$sip_binary_dir/Sunlight" "$sip_bundle/Contents/MacOS/Sunlight"
+cp "$sip_binary_dir/Sunlight" "$sip_bundle/Contents/Helpers/SunlightBankHost"
 cp "$sip_root/Info.plist" "$sip_bundle/Contents/Info.plist"
 cp "$sip_root/Resources/Sunlight.icns" "$sip_bundle/Contents/Resources/"
 sip_sparkle="$sip_binary_dir/Sparkle.framework"
@@ -32,16 +33,17 @@ path = pathlib.Path(sys.argv[1])
 info = plistlib.loads(path.read_bytes())
 info.update(CFBundleIdentifier="com.kasselvania.sunlight.virtualcanvas",
             CFBundleName="Sunlight Canvas Lab", CFBundleDisplayName="Sunlight Canvas Lab",
-            CFBundleVersion="7", LSUIElement=False, SunlightSIPRedesign=True)
+            CFBundleVersion="8", LSUIElement=False, SunlightSIPRedesign=True)
 info.pop("NSAppleEventsUsageDescription", None)
 path.write_bytes(plistlib.dumps(info))
 PY
+codesign --force --sign "$SIGN" --identifier com.kasselvania.sunlight.bankhost "$sip_bundle/Contents/Helpers/SunlightBankHost"
 codesign --force --sign "$SIGN" "$sip_bundle"
 codesign --verify --strict --deep "$sip_bundle"
 echo "Built $sip_bundle"
 if [[ "${1:-}" == "--install" ]]; then
   sip_install="$HOME/Applications/Sunlight Canvas Lab.app"
-  if pgrep -f '^/Users/[^/]+/Applications/Sunlight Canvas Lab.app/Contents/MacOS/' >/dev/null; then
+  if pgrep -f '^/Users/[^/]+/Applications/Sunlight Canvas Lab.app/Contents/(MacOS|Helpers)/' >/dev/null; then
     echo "Quit Sunlight Canvas Lab before replacing its running bundle." >&2
     exit 1
   fi

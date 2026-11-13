@@ -18,16 +18,20 @@ final class CapturedWindowInput {
     private var preparing = false
     private var pending: [CGEvent] = []
     private var revision = 0
+    private var physicalDown: CGEventTimestamp?
+    private var nativeFrame: CGRect?
     private var pointerDown: CGEvent?
+    private let isolation = CapturedInputIsolation()
     private let postedSource = CGEventSource(stateID: .privateState)
     private var mouseSequence: Int64 = 0
     private(set) var eventsPosted = 0
     var onFailure: ((String) -> Void)?
+    var worldPoint: ((CGPoint) -> CGPoint)?
     var onPointerReleased: (() -> Void)?
 
     var windowID: CGWindowID? { target?.windowID }
 
-    func shutdown() { clear() }
+    func shutdown() { clear(); isolation.shutdown() }
 
     func clear() {
         if let down = pointerDown, let target,
@@ -36,7 +40,7 @@ final class CapturedWindowInput {
             up.setDoubleValueField(.mouseEventPressure, value: 0)
             up.postToPid(target.pid)
         }
-        pointerDown = nil
+        pointerDown = nil; nativeFrame = nil; physicalDown = nil
         onPointerReleased?()
         revision += 1
         target = nil
@@ -65,7 +69,17 @@ final class CapturedWindowInput {
             return false
         }
         if target !== proxy { prepare(proxy) }
-        if event.type == .leftMouseDown { mouseSequence &+= 1 }
+        nativeFrame = native.bounds
+        if event.type == .leftMouseDown {
+            physicalDown = source.timestamp
+            let destinationPID = proxy.pid
+            guard let canvasID = CGWindowID(exactly: event.windowNumber),
+                  isolation.protect(pid: proxy.pid, canvas: canvasID, mark: CanvasView.passedOnMark,
+                      rewrite: { [weak self] in self?.rewriteForeignPointer($0, pid: destinationPID) }) else {
+                clear(); onFailure?("Could not isolate the canvas gesture from the destination app."); return false
+            }
+            mouseSequence &+= 1
+        }
         let point = Self.nativePoint(world: world, tile: proxy.worldRect, native: native.bounds)
         let original: CGEvent
         if source.type == .leftMouseDown || source.type == .leftMouseUp || source.type == .leftMouseDragged {
@@ -93,6 +107,17 @@ final class CapturedWindowInput {
         }
         send(original)
         return target === proxy
+    }
+
+    private func rewriteForeignPointer(_ event: CGEvent, pid: pid_t) -> CGEvent? {
+        guard !preparing, let physicalDown, event.timestamp >= physicalDown, let target, target.pid == pid,
+              let nativeFrame, let world = worldPoint?(event.location), let copy = event.copy() else { return nil }
+        copy.location = Self.nativePoint(world: world, tile: target.worldRect, native: nativeFrame)
+        address(copy, to: target, local: CGPoint(x: world.x - target.worldRect.minX, y: world.y - target.worldRect.minY))
+        copy.setIntegerValueField(.mouseEventNumber, value: mouseSequence)
+        copy.setIntegerValueField(.eventSourceUserData, value: CanvasView.passedOnMark)
+        if event.type == .leftMouseUp { pointerDown = nil; self.physicalDown = nil; onPointerReleased?() }
+        return copy
     }
 
     private func address(_ event: CGEvent, to proxy: WindowProxy, local: CGPoint) {

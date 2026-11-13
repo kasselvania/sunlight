@@ -10,6 +10,7 @@ final class SourceBank {
     private var input: FileHandle?
     private var token = ""
     private var recovering = false
+    private var hostIdentity = ""
     private var sequence = 0
     private var requests: [Int: CheckedContinuation<[String: Any], Never>] = [:]
     private var stopping: [CheckedContinuation<Bool, Never>] = []
@@ -19,12 +20,10 @@ final class SourceBank {
     private var native = Set<CGWindowID>()
     private var releasing = Set<CGWindowID>()
     private var refused: [CGWindowID: String] = [:]
-    private var capture: SourceBankCapture?
+    private var captures: [CGDirectDisplayID: SourceBankCapture] = [:]
     private var captureRevision = 0
     private var captureWork: DispatchWorkItem?
-    private var displayID: CGDirectDisplayID = 0
-    private var bounds = CGRect.zero
-    private var scale: CGFloat = 2
+    private var banks: [CGDirectDisplayID: (bounds: CGRect, scale: CGFloat)] = [:]
     private(set) var phase = "idle"
     private(set) var error: String?
     var onChange: (() -> Void)?
@@ -37,13 +36,17 @@ final class SourceBank {
     }()
 
     var status: [String: Any] {
-        ["phase": phase, "host_pid": process?.processIdentifier ?? 0,
-         "display_id": displayID, "display_active": SourceBankGeometry.activeDisplayIDs().contains(displayID),
-         "bounds": NSStringFromRect(bounds), "scale": scale,
-         "capture_streams": capture?.running == true ? 1 : 0, "frames_received": capture?.received ?? 0,
-         "frames_presented": capture?.presented ?? 0, "capture_seconds": capture?.elapsed ?? 0,
-         "capture_rect": capture.map { NSStringFromRect($0.source) } ?? "",
+        let feeds: [[String: Any]] = captures.sorted { $0.key < $1.key }.map { id, feed in
+            ["display_id": id, "backend": feed.backend, "frames_received": feed.received, "frames_presented": feed.presented,
+             "pixel_width": feed.pixelSize.width, "pixel_height": feed.pixelSize.height,
+             "capture_seconds": feed.elapsed, "capture_rect": NSStringFromRect(feed.source), "running": feed.running]
+        }
+        return ["phase": phase, "host_pid": process?.processIdentifier ?? 0,
+         "host_bundle_id": hostIdentity, "display_ids": banks.keys.sorted(), "displays": banks.map { ["id": $0.key, "bounds": NSStringFromRect($0.value.bounds), "scale": $0.value.scale] },
+         "display_active": !banks.isEmpty && Set(banks.keys).isSubset(of: SourceBankGeometry.activeDisplayIDs()),
+         "capture_streams": captures.values.filter(\.running).count, "feeds": feeds,
          "windows": entries.values.map { ["id": $0.record.id, "pid": $0.record.process.pid,
+                    "display_id": $0.record.displayID ?? 0,
                     "original": NSStringFromRect($0.record.originalCG), "native": NSStringFromRect($0.record.native)] },
          "pending": pending.sorted(), "refused": refused.map { ["id": $0.key, "reason": $0.value] },
          "error": error ?? ""]
@@ -78,7 +81,9 @@ final class SourceBank {
         token = UUID().uuidString
         phase = "starting"; error = nil; refused.removeAll(); native.removeAll()
         let child = Process(), stdin = Pipe(), stdout = Pipe()
-        child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
+        let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/SunlightBankHost")
+        child.executableURL = FileManager.default.isExecutableFile(atPath: helper.path)
+            ? helper : URL(fileURLWithPath: CommandLine.arguments[0]).standardizedFileURL
         child.arguments = ["--sip-redesign", "--sip-bank-host", token]
         if recoverOnly { child.arguments?.append("--sip-bank-recover") }
         child.standardInput = stdin; child.standardOutput = stdout; child.standardError = FileHandle.standardError
@@ -109,7 +114,7 @@ final class SourceBank {
         for p in proxies where p.kind == .window && p.attachedTo == nil && p.away == nil && !p.leaving
             && !protects(p.windowID) && !native.contains(p.windowID) && refused[p.windowID] == nil
             && (scope?.contains(p.windowID) ?? true) {
-            guard let real = WindowList.onScreen(p.windowID), !bounds.intersects(real.bounds) else { continue }
+            guard let real = WindowList.onScreen(p.windowID), !banks.values.contains(where: { $0.bounds.intersects(real.bounds) }) else { continue }
             pending.insert(p.windowID)
             let id = p.windowID
             Task { [weak self, weak p] in
@@ -155,7 +160,7 @@ final class SourceBank {
 
     func stop() async -> Bool {
         captureWork?.cancel(); captureWork = nil
-        captureRevision += 1; capture?.stop(); capture = nil
+        captureRevision += 1; stopCaptures()
         guard process != nil else {
             return entries.isEmpty && !FileManager.default.fileExists(atPath: SourceBankHost.journalURL.path)
         }
@@ -192,10 +197,15 @@ final class SourceBank {
         guard session == token, value["token"] as? String == session, let event = value["event"] as? String else { return }
         switch event {
         case "ready":
-            guard phase == "starting", let id = (value["display_id"] as? NSNumber)?.uint32Value,
-                  let rect = value["bounds"] as? String else { return }
-            displayID = id; bounds = NSRectFromString(rect); scale = (value["scale"] as? NSNumber)?.doubleValue ?? 2
-            SIPRedesign.sourceDisplayID = id
+            guard phase == "starting", let displays = value["displays"] as? [[String: Any]], !displays.isEmpty else { return }
+            hostIdentity = value["host_bundle_id"] as? String ?? ""
+            banks.removeAll()
+            for display in displays {
+                guard let id = (display["id"] as? NSNumber)?.uint32Value, let rect = display["bounds"] as? String,
+                      let scale = (display["scale"] as? NSNumber)?.doubleValue else { continue }
+                banks[id] = (NSRectFromString(rect), CGFloat(scale))
+            }
+            SIPRedesign.sourceDisplayIDs = Set(banks.keys)
             retireRestoredEntries()
             phase = "running"
             finishReadiness(); onChange?()
@@ -211,8 +221,8 @@ final class SourceBank {
             onChange?()
         case "restoration_pending": phase = "stopping"; fail(value["error"] as? String ?? "Waiting for original windows to restore.")
         case "stopped":
-            phase = "stopped"; captureRevision += 1; capture?.stop(); capture = nil
-            retireRestoredEntries(); pending.removeAll(); SIPRedesign.sourceDisplayID = nil
+            phase = "stopped"; captureRevision += 1; stopCaptures()
+            retireRestoredEntries(); pending.removeAll(); SIPRedesign.sourceDisplayIDs.removeAll()
             onChange?()
         case "failed": phase = "failed"; fail(value["error"] as? String ?? "Source-bank startup failed."); finishReadiness()
         default: break
@@ -226,7 +236,7 @@ final class SourceBank {
         for reply in requests.values { reply.resume(returning: ["error": "The source-bank host exited."]) }
         requests.removeAll()
         if phase != "stopped" && phase != "failed" {
-            captureRevision += 1; capture?.stop(); capture = nil
+            captureRevision += 1; stopCaptures()
             if !recovering {
                 phase = "recovery needed"
                 fail("The source-bank host exited. Restoring the originals from its journal.")
@@ -265,31 +275,37 @@ final class SourceBank {
         captureWork = nil
         captureRevision += 1
         let revision = captureRevision
-        guard phase == "running", !entries.isEmpty else { capture?.stop(); capture = nil; return }
+        guard phase == "running", !entries.isEmpty else { stopCaptures(); return }
         Task { [weak self] in
             guard let self else { return }
             do {
                 let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
-                guard self.captureRevision == revision, self.phase == "running",
-                      let display = content.displays.first(where: { $0.displayID == self.displayID }) else { return }
-                let records = self.entries.values.map(\.record)
-                let windows = records.compactMap { record in content.windows.first { $0.windowID == record.id && $0.owningApplication?.processID == record.process.pid } }
-                guard windows.count == records.count else { self.scheduleCapture(); return }
-                let source = records.map(\.native).reduce(CGRect.null) { $0.union($1) }.integral
-                guard display.frame.contains(source) else { self.captureFailed("A banked window moved outside the capture display."); return }
-                let feed = SourceBankCapture(display: display, windows: windows, source: source, scale: self.scale,
-                                             fps: SIPRedesign.frameRate(displayID: CGMainDisplayID()))
-                feed.onFrame = { [weak self, weak feed] buffer, region in
-                    guard let self, self.capture === feed else { return }
-                    for entry in self.entries.values where region.contains(entry.record.native) {
-                        entry.proxy?.applyBankFrame(buffer, crop: SourceBankGeometry.crop(window: entry.record.native, source: region))
+                guard self.captureRevision == revision, self.phase == "running" else { return }
+                var fresh: [CGDirectDisplayID: SourceBankCapture] = [:]
+                for (id, bank) in self.banks {
+                    let records = self.entries.values.map(\.record).filter { $0.displayID == id }
+                    guard !records.isEmpty else { continue }
+                    guard let display = content.displays.first(where: { $0.displayID == id }) else { self.captureFailed("A source display is unavailable."); return }
+                    let windows = records.compactMap { record in content.windows.first { $0.windowID == record.id && $0.owningApplication?.processID == record.process.pid } }
+                    guard windows.count == records.count else { self.scheduleCapture(); return }
+                    let source = records.map(\.native).reduce(CGRect.null) { $0.union($1) }.integral
+                    guard display.frame.contains(source) else { self.captureFailed("A banked window moved outside its capture display."); return }
+                    let feed = SourceBankCapture(display: display, source: source, scale: bank.scale,
+                                                 fps: SIPRedesign.frameRate(displayID: CGMainDisplayID()))
+                    feed.onFrame = { [weak self, weak feed] buffer, region in
+                        guard let self, self.captures[id] === feed else { return }
+                        for entry in self.entries.values where entry.record.displayID == id && region.contains(entry.record.native) {
+                            entry.proxy?.applyBankFrame(buffer, crop: SourceBankGeometry.crop(window: entry.record.native, source: region))
+                        }
                     }
+                    feed.onError = { [weak self, weak feed] text in
+                        guard let self, self.captures[id] === feed else { return }
+                        self.captureFailed("Window-bank capture: \(text)")
+                    }
+                    fresh[id] = feed
                 }
-                feed.onError = { [weak self, weak feed] text in
-                    guard let self, self.capture === feed else { return }
-                    self.captureFailed("Window-bank capture: \(text)")
-                }
-                self.capture?.stop(); self.capture = feed; feed.start()
+                self.stopCaptures(); self.captures = fresh
+                for feed in fresh.values { feed.start() }
                 self.onChange?()
             } catch {
                 guard self.captureRevision == revision, self.phase == "running" else { return }
@@ -297,6 +313,8 @@ final class SourceBank {
             }
         }
     }
+
+    private func stopCaptures() { for feed in captures.values { feed.stop() }; captures.removeAll() }
 
     private func fail(_ text: String) { error = text; Log.note("Window bank: \(text)"); onFailure?(text) }
     private func captureFailed(_ text: String) {

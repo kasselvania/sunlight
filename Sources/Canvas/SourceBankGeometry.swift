@@ -22,12 +22,14 @@ struct BankRecord: Codable, Sendable {
     let originalCG: CGRect
     let document: String?
     var native: CGRect
+    var displayID: CGDirectDisplayID?
 }
 
 struct BankJournal: Codable {
     let token: String
     let host: BankProcess
-    var displayID: CGDirectDisplayID?
+    var displayID: CGDirectDisplayID? // Recovery of build 7 journals.
+    var displayIDs: [CGDirectDisplayID]?
     var records: [BankRecord]
 }
 

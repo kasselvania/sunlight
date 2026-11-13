@@ -307,3 +307,113 @@ The final installed executable SHA-256 is
 `2ac5f2711bd07cd2b4d5d64cb420ac86ef889fc6656ef6e26a17f366808f1e83`.
 The app is left closed after restoration; only the two owned fixture windows
 were closed during cleanup.
+
+## Capture performance build 8
+
+2026-11-13: the original Swift app now supplies two fixed 3072 × 2048 logical,
+2× Retina source displays. First-fit placement spans both displays while keeping
+their native rectangles independent of canvas layout. Each journal record names
+its display; the reader still accepts build 7's singular-display journal. The
+signed, unprivileged restoration process has its own executable and signing
+identifier inside the canonical app, rather than starting another main-app GUI
+instance. No SIP exception or injected component was added.
+
+The measurements isolated contention between capture streams. With the original
+two-window bank and eight ordinary window streams on the same ten-window desktop,
+the animated bank delivered 23.50 complete frames/s. Changing queue depth or
+reducing output scale while keeping that contention did not remove the limit.
+A no-op frame receiver also saw the limit, so a slow canvas draw was not its cause.
+An isolated display feed was much faster. This motivated enough bank capacity
+to replace the overflow streams, rather than reducing image quality.
+
+Two-bank ScreenCaptureKit trials delivered 61.63 frames/s with selected windows,
+and 68.51 with the composed display. A composed Core Graphics display stream
+delivered 86.99 received and applied frames/s in development. The preferred
+backend wraps its IOSurfaces in pixel buffers without copying their pixels.
+Retaining a surface alone is insufficient: each buffer also carries an explicit
+IOSurface pool use-count lease, released only after its final reader. The current
+ScreenCaptureKit composed-display feed remains the startup fallback when the
+optional Core Graphics symbols are missing or start is rejected. The latter API
+is obsolete in the SDK; its working runtime on macOS 26.4.1 is a compatibility
+dependency, not a supported-forever guarantee.
+
+The first two normal installed Debug launches delivered 94.42 and 93.50 complete
+and applied frames/s in twelve-second observations of the animated bank. All ten
+windows were banked with no overflow capture. The two ROIs were 5418 × 3696 and
+5770 × 3112 pixels, exactly 2× their logical bounds. Only Safari was continuously
+animated. The other bank emitted very few new frames, correctly reflecting its
+mostly static content. Rates are per bank and must not be summed. Source frame
+counts, received frames, applied frames and requested display rate are distinct;
+this does not establish physical presentation of every frame or input latency.
+
+The installed app accepted a click at caret 315, six individual virtual-key
+letters advancing the caret to 321, and a 17-character drag selection. Browser
+screenshots advanced from frame 251538 to 251675 with a moving dot. Native
+handoff released TextEdit, and Show Canvas parked it again with the other nine
+windows. These native-UI checks remain distinct from physical human input.
+
+Focusing a source while its canvas press was held also delivered an untagged
+canvas drag/release to the source PID. A per-destination PID event tap corrects
+only those foreign-window events, using the same camera/native-coordinate map
+and gesture number as the existing bridge. It passes other events unchanged.
+The tap subscribes to the complete PID stream because a restricted mouse mask
+starved AppKit keyboard delivery during tracking. There is no global HID tap.
+
+Optimized Release candidates failed typing and are not qualified. The delivered
+development script retains its original Debug configuration, where installed
+typing and selection passed. Earlier measurements obscured by stacked capture
+consent dialogs were rejected. Native UI approval cleared requests belonging
+only to the authorized Sunlight/T3 capture trials. Input Monitoring was enabled
+during investigation; these observations do not establish independence from
+that grant. Cleanup controls inadvertently toggled Canvas Lab's Accessibility
+grant off; it was restored through System Settings before the accepted relaunch.
+No privacy database was edited or reset.
+
+The first four two-bank failure exercises restored their three owned windows:
+main crash, one actual source-display removal, host crash with automatic journal
+recovery, and both processes dying followed by normal relaunch. They also exposed
+three additional capture-consent requests. The stopped native feed was attempting
+ScreenCaptureKit fallback on a disappearing display. Runtime feed failure now
+stops and restores the bank; fallback is selected at startup only. The final
+artifact repeats the affected installed and recovery checks below.
+
+An earlier recovery fixture was 1700 points tall on a 1447-point physical display.
+macOS repositioned it after virtual-display removal, so that observation failed
+exact-frame restoration. The retained `recovery-oversized-fixture.log` is not a
+pass. A 3000 × 1300 owned window forces placement across both banks while fitting
+the physical screen. Oversized-window recovery remains a separate gap.
+
+Evidence is under ignored `build/sip-redesign/performance`: `baseline.json`,
+`multi-development.json`, `multi-native.json`, `multi-sck-composed.json`,
+`installed-before-stop-fix.json`, the installed screenshots, and
+`recovery-before-stop-fix.log`. Final artifact evidence is recorded separately.
+The retained gaps from build 7 still apply, including overlapping title labels,
+source-focused modifier navigation, window families, menus, native drag and drop,
+IME, global-pointer polling, physical-monitor unplug, capacity beyond two banks,
+covered Spaces consolidation and full product parity. Sustained 100 Hz and
+all-windows-animated workloads remain unqualified.
+
+Final installed artifact: the twelve-second animated-bank observation delivered
+93.01 complete and 93.09 applied frames/s, at the same full 2× output sizes with
+all ten windows banked and no refusals. The one-frame boundary difference between
+the counters is sampling granularity, not a second source of frames. Caret,
+six-letter insertion and 17-character selection passed again. The final four
+failure exercises each restored all three owned windows to their recorded
+frames, removed both displays and retired the journal. Each case checked for
+new Sunlight capture-consent dialogs through native Accessibility; all four
+counts were zero. Ordinary capture consent remains required by macOS.
+
+`installed-build8-final.log`, `installed-verification.json`, `installed-rate.json`,
+`recovery-build8-final.log`, `parent-crash.json`, `single-bank-disconnect.json`,
+`host-crash.json`, `both-crash-relaunch.json`, `interrupted-journal.json` and
+`installed-artifact.json` bind these final observations. The build, 33 focused
+tests (including real IOSurface lease lifetime and legacy journal decoding),
+strict deep signature, shell syntax and whitespace checks passed. The installed
+executable SHA-256 is
+`c0ef72d3c8f45c9a082b407c3903ad33010e2160ec35efbcccd2e30b3e46ec96`.
+Final cleanup closes only the three owned fixture windows. The app remains
+closed, the journal is absent, and only physical display ID 2 remains active.
+Native cleanup found none of the owned IDs in the apps' AX windows or the
+on-screen list. Quartz retained one unmapped Safari metadata entry after close;
+that entry was not counted as an active window. The user's source apps were not
+force-quit.

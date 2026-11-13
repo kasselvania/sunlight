@@ -383,6 +383,7 @@ final class CanvasController {
         }
         view.onCapturedInput = { [weak self] proxy, event, world in
             self?.wantsFrontUntil = 0
+            if event.type == .leftMouseDown { self?.window.resignKey() }
             return self?.capturedInput.pointer(event, to: proxy, world: world) ?? false
         }
         view.onCapturedInputCleared = { [weak self] in self?.capturedInput.clear() }
@@ -390,6 +391,10 @@ final class CanvasController {
             guard let self else { return }
             Log.note("Captured input: \(message)")
             CanvasToast.show(message, in: self.overlay)
+        }
+        capturedInput.worldPoint = { [weak self] point in
+            guard let self else { return point }
+            return self.view.camera.global(viewOrigin: self.display.origin).toWorld(point)
         }
         capturedInput.onPointerReleased = { [weak self] in self?.view.releaseCapturedPress() }
         view.onSpring = { [weak self] proxy, point in self?.springInto(proxy, around: point) }

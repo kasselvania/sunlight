@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
+#import "SLDisplayStream.h"
 
 NS_ASSUME_NONNULL_BEGIN
 /// Owns one temporary extended display. Releasing it removes only that display.

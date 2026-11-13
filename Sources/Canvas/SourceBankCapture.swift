@@ -2,17 +2,21 @@ import AppKit
 import ScreenCaptureKit
 import CoreMedia
 import os
+import SourceDisplay
 
 /// One immutable capture geometry per stream. Reconfiguration starts a new
 /// instance, so an old buffer can never be cropped using a new source rectangle.
 @MainActor
 final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
-    private struct Mailbox: @unchecked Sendable { var buffer: CVPixelBuffer?; var scheduled = false; var received = 0 }
+    private struct Mailbox: @unchecked Sendable { var buffer: CVPixelBuffer?; var scheduled = false; var received = 0; var width = 0; var height = 0 }
     nonisolated private let mailbox = OSAllocatedUnfairLock(initialState: Mailbox())
     nonisolated private static let samples = DispatchQueue(label: "sunlight.bank.frames", qos: .userInteractive)
     let source: CGRect
     private var stream: SCStream?
+    private var displayStream: SLDisplayStream?
+    private(set) var backend = "starting"
     private var starting = false
+    private var screenCaptureStarted = false
     private var stopped = false
     private var began: CFTimeInterval?
     private(set) var presented = 0
@@ -20,12 +24,13 @@ final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     var onFrame: ((CVPixelBuffer, CGRect) -> Void)?
     var onError: ((String) -> Void)?
     var received: Int { mailbox.withLock { $0.received } }
+    var pixelSize: CGSize { mailbox.withLock { CGSize(width: $0.width, height: $0.height) } }
     var elapsed: Double { began.map { CACurrentMediaTime() - $0 } ?? 0 }
 
-    init(display: SCDisplay, windows: [SCWindow], source: CGRect, scale: CGFloat, fps: Int32) {
+    init(display: SCDisplay, source: CGRect, scale: CGFloat, fps: Int32) {
         self.source = source
         super.init()
-        let filter = SCContentFilter(display: display, including: windows)
+        let filter = SCContentFilter(display: display, excludingWindows: [])
         let config = SCStreamConfiguration()
         config.sourceRect = source.offsetBy(dx: -display.frame.minX, dy: -display.frame.minY)
         config.width = max(2, Int((source.width * scale).rounded()))
@@ -35,6 +40,19 @@ final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         config.queueDepth = 3
         config.showsCursor = false
         config.capturesAudio = false
+        displayStream = SLDisplayStream(displayID: display.displayID,
+            sourceRect: config.sourceRect, pixelSize: CGSize(width: config.width, height: config.height), queue: Self.samples)
+        displayStream?.onFrame = { [weak self] buffer in self?.enqueue(buffer) }
+        displayStream?.onStopped = { [weak self] in
+            DispatchQueue.main.async {
+                guard let self, !self.stopped, self.backend == "coregraphics" else { return }
+                self.displayStream?.stop(); self.displayStream = nil
+                self.running = false
+                // A running feed stopping can mean its display disappeared.
+                // Restore the bank; don't ask another API to capture a dead display.
+                self.onError?("The source-display feed stopped.")
+            }
+        }
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         do { try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: Self.samples) }
         catch { onError?(error.localizedDescription); return }
@@ -42,11 +60,19 @@ final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func start() {
+        if displayStream?.start() == true {
+            backend = "coregraphics"; running = true; began = CACurrentMediaTime()
+        } else { displayStream = nil; startScreenCapture() }
+    }
+
+    private func startScreenCapture() {
+        backend = "screencapturekit"
         guard let stream else { onError?("Could not attach the source-bank frame receiver."); return }
         starting = true
         stream.startCapture { [self] error in
             DispatchQueue.main.async {
                 self.starting = false
+                self.screenCaptureStarted = error == nil
                 if self.stopped { self.stop(); return }
                 if let error { self.onError?(error.localizedDescription) }
                 else { self.running = true; self.began = CACurrentMediaTime() }
@@ -57,9 +83,12 @@ final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() {
         stopped = true
         running = false
+        displayStream?.stop(); displayStream = nil
         mailbox.withLock { $0.buffer = nil }
         guard !starting, let stream else { return }
         self.stream = nil
+        guard screenCaptureStarted else { return }
+        screenCaptureStarted = false
         stream.stopCapture { error in if let error { Log.note("Window bank: stopping capture failed: \(error)") } }
     }
 
@@ -68,9 +97,14 @@ final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
               let items = CMSampleBufferGetSampleAttachmentsArray(sample, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               (items.first?[.status] as? NSNumber)?.intValue == SCFrameStatus.complete.rawValue,
               let buffer = CMSampleBufferGetImageBuffer(sample) else { return }
+        enqueue(buffer)
+    }
+
+    nonisolated private func enqueue(_ buffer: CVPixelBuffer) {
         let frame = Mailbox(buffer: buffer)
         let schedule = mailbox.withLock { box in
             box.received += 1
+            box.width = CVPixelBufferGetWidth(buffer); box.height = CVPixelBufferGetHeight(buffer)
             box.buffer = frame.buffer
             if box.scheduled { return false }
             box.scheduled = true

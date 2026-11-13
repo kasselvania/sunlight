@@ -128,7 +128,7 @@ through an approximately 80% tile while the camera stayed fixed. The visible til
 Quit and normal relaunch preserved access. See the [local findings](experiments/virtual-display-canvas/LOCAL_FINDINGS.md#installed-redesign-build-6)
 for the bounded evidence and the earlier failures. Sustained performance and full product parity remain open.
 
-### Window bank integration — build 7
+### Window bank integration — build 7 baseline
 
 The same Swift app now parks eligible real windows on one temporary Retina virtual display and
 crops their live tiles from one ScreenCaptureKit display stream. Native source placement is separate
@@ -161,6 +161,39 @@ requesting 100; this does not meet the product's 100 Hz performance target. Modi
 currently requires reactivating the canvas after captured editing. Window families, menus, IME,
 native drag and drop, global-pointer-dependent apps, bank resizing/capacity and physical-monitor
 unplug remain required work. See the [build 7 findings](experiments/virtual-display-canvas/LOCAL_FINDINGS.md#installed-window-bank-build-7).
+
+### Capture performance — build 8
+
+The signed development app now uses two 3072 × 2048 logical Retina source displays, with one
+shared feed per occupied display. This held all ten windows on the observed desktop without
+per-window overflow streams. Source geometry, canvas layout and native input remain separate.
+
+The preferred feed wraps the composed display's IOSurfaces without copying their pixels. Each
+pixel buffer keeps an explicit surface-pool lease until its last reader releases it. The existing
+ScreenCaptureKit path remains the fallback when the optional Core Graphics display-stream API
+is unavailable or rejects capture. That API is obsolete in the SDK and remains an OS compatibility
+dependency; this result does not remove the need for normal macOS capture consent.
+
+On this Mac's 100 Hz display, normal launches of installed build 8 delivered **93–94.4
+complete and applied frames/s** from the animated Safari bank, at full 2× backing resolution.
+The earlier mixed-stream baseline was 23.5 frames/s. These are bounded local observations with
+one animated browser window and nine other windows, not a sustained or all-windows-animated
+benchmark. A static bank emits few new frames; the two bank rates must not be added together.
+
+Caret placement, typing and drag selection passed in the installed **Debug** development bundle,
+as did native handoff and return. Optimized Release candidates failed input and are not qualified;
+the build script retains its original Debug configuration. A per-destination event tap corrects
+physical canvas drag/release events that macOS also delivers to the newly focused app.
+
+The 100 Hz target, uninterrupted modifier navigation after editing, menus and window families,
+drag and drop, IME, capacity beyond these two banks and full product parity remain open. See the
+[build 8 findings](experiments/virtual-display-canvas/LOCAL_FINDINGS.md#capture-performance-build-8)
+for measurements, recovery results and limitations.
+
+The final installed artifact restored originals after parent failure, host failure, removal of
+one source display, and both processes dying followed by relaunch. Both owned displays and the
+journal were removed. Those four final exercises produced no new capture-consent requests;
+a stopped running feed now restores the bank instead of attempting capture on a disappearing display.
 
 ## Getting around
 

@@ -60,7 +60,7 @@ struct Display: Equatable, Sendable {
         let screens = NSScreen.screens
         guard let primary = screens.first else { return [] }
         return screens.compactMap { Display(screen: $0, primaryHeight: primary.frame.height) }.filter {
-            !SIPRedesign.enabled || $0.id != SIPRedesign.sourceDisplayID
+            !SIPRedesign.enabled || !SIPRedesign.sourceDisplayIDs.contains($0.id)
         }
     }
 

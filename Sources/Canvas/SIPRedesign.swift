@@ -3,7 +3,7 @@ import AppKit
 /// The SIP-enabled implementation runs through Sunlight's existing canvas, in
 /// a separate development bundle. It never enters the legacy setup/loader path.
 enum SIPRedesign {
-    @MainActor static var sourceDisplayID: CGDirectDisplayID?
+    @MainActor static var sourceDisplayIDs = Set<CGDirectDisplayID>()
     static let enabled = Bundle.main.object(forInfoDictionaryKey: "SunlightSIPRedesign") as? Bool == true
         || CommandLine.arguments.contains("--sip-redesign")
 
