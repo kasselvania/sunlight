@@ -57,6 +57,37 @@ enum SourceBankGeometry {
         return nil
     }
 
+    /// What a banked window's live native frame asks of the bank. The bank's
+    /// record must follow the window, never the other way round: the picture
+    /// crop and the input mapping both read that one frame.
+    enum Drift: Equatable {
+        /// Where the record has it.
+        case same
+        /// Moved or resized, still inside its bank and clear of its neighbours:
+        /// the record (and so the crop) takes the new frame.
+        case follow(CGRect)
+        /// Grown into a neighbour's slot or left the bank: it needs a new slot.
+        case reslot(CGRect)
+    }
+
+    static func drift(live: CGRect, recorded: CGRect, bank: CGRect, neighbours: [CGRect]) -> Drift {
+        let fits = bank.contains(live) && !neighbours.contains(where: { $0.intersects(live) })
+        if !fits { return .reslot(live) }
+        return live.isClose(to: recorded) ? .same : .follow(live)
+    }
+
+    /// The region a bank feed captures: its windows plus headroom, so ordinary
+    /// moves and resizes stay inside the running feed instead of restarting it.
+    /// `SIP_BANK_HEADROOM` (points) overrides it, for measuring its throughput cost.
+    static let feedHeadroom: CGFloat = ProcessInfo.processInfo.environment["SIP_BANK_HEADROOM"]
+        .flatMap { Double($0) }.map { CGFloat(max(0, $0)) } ?? 384
+
+    static func feedSource(windows: [CGRect], display: CGRect) -> CGRect {
+        let union = windows.reduce(CGRect.null) { $0.union($1) }
+        guard !union.isNull else { return .null }
+        return union.insetBy(dx: -feedHeadroom, dy: -feedHeadroom).intersection(display).integral
+    }
+
     static func crop(window: CGRect, source: CGRect) -> CGRect {
         CGRect(x: (window.minX - source.minX) / source.width,
                y: 1 - (window.maxY - source.minY) / source.height,

@@ -128,9 +128,17 @@ final class SourceBankHost: @unchecked Sendable {
                 let pid = (command["pid"] as? NSNumber)?.int32Value ?? 0
                 let record = try park(id, pid: pid)
                 send(["event": "reply", "request": request, "record": try object(record)])
+            case "place":
+                let id = (command["id"] as? NSNumber)?.uint32Value ?? 0
+                let record = try place(id)
+                send(["event": "reply", "request": request, "record": try object(record)])
             case "release":
                 let id = (command["id"] as? NSNumber)?.uint32Value ?? 0
-                let restored = try restore(id)
+                var to: CGPoint?
+                if let x = (command["x"] as? NSNumber)?.doubleValue, let y = (command["y"] as? NSNumber)?.doubleValue {
+                    to = CGPoint(x: x, y: y)
+                }
+                let restored = try restore(id, to: to)
                 send(["event": "reply", "request": request, "restored": restored.map { NSStringFromRect($0) } ?? ""])
             case "stop": finish(reason: "requested")
             default: throw failure("Unknown window-bank operation.")
@@ -146,12 +154,7 @@ final class SourceBankHost: @unchecked Sendable {
               !ax.isFullScreen, !ax.isMinimized, let original = ax.frame else {
             throw failure("This window cannot be parked with a restorable Accessibility identity.")
         }
-        let placement = displayIDs.compactMap { id -> (CGDirectDisplayID, CGRect)? in
-            guard let bounds = banks[id], let slot = SourceBankGeometry.slot(size: listed.bounds.size, display: bounds,
-                occupied: journal.records.filter { $0.displayID == id }.map(\.native)) else { return nil }
-            return (id, slot)
-        }.first
-        guard let (bankID, slot) = placement, let bankBounds = banks[bankID] else {
+        guard let (bankID, slot) = freeSlot(size: listed.bounds.size, excluding: id), let bankBounds = banks[bankID] else {
             throw failure("This window does not fit in the source banks; it remains on its original display.")
         }
         var record = BankRecord(id: id, process: process, originalAX: original, originalCG: listed.bounds,
@@ -179,35 +182,113 @@ final class SourceBankHost: @unchecked Sendable {
         }
     }
 
-    @discardableResult private func restore(_ id: CGWindowID) throws -> CGRect? {
+    /// Where each parked window really is now. The journal's frames are the
+    /// last placement; an app or a resize on the canvas may have changed them.
+    private func liveNative(_ record: BankRecord) -> CGRect {
+        guard let listed = WindowList.onScreen(record.id), listed.pid == record.process.pid else { return record.native }
+        return listed.bounds
+    }
+
+    /// The first free slot for `size`, its current bank first, never overlapping
+    /// another parked window where it actually is.
+    private func freeSlot(size: CGSize, excluding id: CGWindowID, prefer: CGDirectDisplayID? = nil) -> (CGDirectDisplayID, CGRect)? {
+        let order = prefer.map { p in [p] + displayIDs.filter { $0 != p } } ?? displayIDs
+        return order.compactMap { bankID -> (CGDirectDisplayID, CGRect)? in
+            guard let bounds = banks[bankID] else { return nil }
+            let occupied = journal.records.filter { $0.id != id && $0.displayID == bankID }.map(liveNative)
+            return SourceBankGeometry.slot(size: size, display: bounds, occupied: occupied).map { (bankID, $0) }
+        }.first
+    }
+
+    /// A parked window that grew into a neighbour or left its bank goes to a
+    /// free slot at the size it has now. Its restoration record is unchanged.
+    private func place(_ id: CGWindowID) throws -> BankRecord {
+        guard let index = journal.records.firstIndex(where: { $0.id == id }) else { throw failure("This window is not parked.") }
+        var record = journal.records[index]
+        guard record.process.isLive, let listed = WindowList.onScreen(id), listed.pid == record.process.pid else {
+            throw failure("The parked window is not on screen.")
+        }
+        let ax = handles[id] ?? AXWindow.windowsByID(pid: record.process.pid)?[id]
+        guard let ax, ax.windowID == id, !ax.isDestroyed, let frame = ax.frame else { throw failure("A parked window's Accessibility identity is unavailable.") }
+        guard let (bankID, slot) = freeSlot(size: listed.bounds.size, excluding: id, prefer: record.displayID),
+              let bankBounds = banks[bankID] else {
+            throw failure(SourceBankHost.noRoom)
+        }
+        let asked = CGPoint(x: slot.minX + frame.minX - listed.bounds.minX, y: slot.minY + frame.minY - listed.bounds.minY)
+        guard ax.setPosition(asked), let actual = awaitFrame(id, pid: record.process.pid, matching: {
+            bankBounds.contains($0) && abs($0.minX - slot.minX) < 3 && abs($0.minY - slot.minY) < 3
+        }) else { throw failure("The app refused its new source-bank position.") }
+        record.native = actual
+        record.displayID = bankID
+        journal.records[index] = record
+        try save()
+        return record
+    }
+
+    static let noRoom = "This window no longer fits in the source banks."
+
+    /// A window's frame whether or not it is on screen (hidden, minimized, another Space). The whole
+    /// list: asking for the one window (`optionIncludingWindow`) returns nothing for one on another
+    /// Space (measured 2026-11-13, macOS 26.4.1).
+    private static func anyFrame(_ id: CGWindowID) -> CGRect? {
+        guard let list = CGWindowListCopyWindowInfo([.optionAll], kCGNullWindowID) as? [[String: Any]],
+              let d = list.first(where: { ($0[kCGWindowNumber as String] as? NSNumber)?.uint32Value == id }),
+              let b = d[kCGWindowBounds as String] else { return nil }
+        return CGRect(dictionaryRepresentation: b as! CFDictionary)
+    }
+
+    /// Takes a parked window out of the bank: to `to` (Accessibility's global
+    /// top-left) when the canvas is entering it, else to its original place.
+    /// Either way at the size it has now: a resize on the canvas is the user's.
+    @discardableResult private func restore(_ id: CGWindowID, to: CGPoint? = nil) throws -> CGRect? {
         guard let record = journal.records.first(where: { $0.id == id }) else { return nil }
         guard record.process.isLive, WindowList.exists(id) else { try forget(id); return nil }
         guard let listed = WindowList.onScreen(id), listed.pid == record.process.pid else {
             // A minimized/hidden window can be absent from onScreen. Its exact
             // cached AX identity is still used, never a nearest-frame substitute.
             if WindowList.onScreen().contains(where: { $0.id == id && $0.pid != record.process.pid }) { try forget(id); return nil }
-            return try restoreHandle(record)
+            return try restoreHandle(record, to: to)
         }
         _ = listed
-        return try restoreHandle(record)
+        return try restoreHandle(record, to: to)
     }
 
-    private func restoreHandle(_ record: BankRecord) throws -> CGRect? {
+    private func restoreHandle(_ record: BankRecord, to: CGPoint? = nil) throws -> CGRect? {
         let ax = handles[record.id] ?? AXWindow.windowsByID(pid: record.process.pid)?[record.id]
-        guard let ax, ax.windowID == record.id, !ax.isDestroyed else { throw failure("A parked window's restoration identity is unavailable.") }
+        guard let ax, ax.windowID == record.id, !ax.isDestroyed else {
+            // Accessibility can't reach it (another Space, its app hidden), but it is already on a
+            // physical display, not stranded on a bank: nothing left to restore. Without this, one such
+            // stale record failed every later launch at recovery.
+            if let frame = Self.anyFrame(record.id), physical.contains(where: { $0.intersects(frame) }) {
+                Log.note("Window bank: \(record.id) is already on a physical display at \(NSStringFromRect(frame)); its record is retired")
+                try forget(record.id)
+                return frame
+            }
+            throw failure("A parked window's restoration identity is unavailable.")
+        }
         if let document = record.document, ax.document?.absoluteString != document { throw failure("A parked document no longer matches its restoration record.") }
-        guard let destination = SourceBankGeometry.restoration(record.originalAX, physical: physical) else { throw failure("No physical display is available for restoration.") }
+        let size = ax.frame?.size ?? record.originalAX.size
+        let destination: CGRect
+        if let to {
+            destination = CGRect(origin: to, size: size)
+        } else {
+            guard let back = SourceBankGeometry.restoration(CGRect(origin: record.originalAX.origin, size: size), physical: physical) else {
+                throw failure("No physical display is available for restoration.")
+            }
+            destination = back
+        }
         // Moving a minimized window is supported by AX; verifying through AX
         // also covers a window not listed on the current Space.
-        _ = ax.setSize(destination.size)
         guard ax.setPosition(destination.origin) else { throw failure("The app refused restoration of its parked window.") }
         let until = Date().addingTimeInterval(1.5)
         var restored: CGRect?
         repeat {
-            if let f = ax.frame, abs(f.minX - destination.minX) < 3, abs(f.minY - destination.minY) < 3,
-               abs(f.width - destination.width) < 3, abs(f.height - destination.height) < 3 { restored = f; break }
+            if let f = ax.frame, abs(f.minX - destination.minX) < 3, abs(f.minY - destination.minY) < 3 { restored = f; break }
             Thread.sleep(forTimeInterval: 0.02)
         } while Date() < until
+        // Entering: macOS or the app may clamp the spot (the menu bar, its own limits). The handoff
+        // reads back where it really went, as it always has; what matters here is that it left the bank.
+        if restored == nil, to != nil, let f = ax.frame, !banks.values.contains(where: { $0.intersects(f) }) { restored = f }
         guard restored != nil else { throw failure("The app has not completed its original-window restoration.") }
         let actual = WindowList.onScreen(record.id)?.bounds ?? destination
         try forget(record.id)

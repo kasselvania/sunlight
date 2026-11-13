@@ -20,6 +20,11 @@ final class CapturedWindowInput {
     private var revision = 0
     private var keyboardOrigin: pid_t?
     private var pointerDown: CGEvent?
+    /// Native minus tile origin, fixed at the press: a drag is the pointer's
+    /// own motion, however the window and its tile move during it.
+    private var pressOffset: CGVector?
+    /// Where the press landed (world) and where its tile was then.
+    private var pressGrab: (world: CGPoint, tile: CGPoint)?
     private let isolation = CapturedInputIsolation()
     private let inputEvents = CapturedInputEvents()
     private let postedSource = CGEventSource(stateID: .privateState)
@@ -31,6 +36,12 @@ final class CapturedWindowInput {
     var onFocused: (() -> Void)?
 
     var windowID: CGWindowID? { target?.windowID }
+
+    /// A press on this window's tile is down (the app may be dragging the window by it).
+    func isDragging(_ id: CGWindowID) -> Bool { pressOffset != nil && target?.windowID == id }
+
+    /// The press on this window's tile: where it landed and where the tile was then.
+    func grab(_ id: CGWindowID) -> (world: CGPoint, tile: CGPoint)? { target?.windowID == id ? pressGrab : nil }
 
     func install(canvas: CGWindowID, presented: @escaping () -> Bool) {
         if !inputEvents.install(canvas: canvas, presented: presented, cancelled: { [weak self] in self?.clear() }) {
@@ -48,7 +59,7 @@ final class CapturedWindowInput {
             up.postToPid(target.pid)
         }
         if !preserveClick { inputEvents.releaseToCanvas(replay: replayCanvas) }
-        pointerDown = nil; keyboardOrigin = nil
+        pointerDown = nil; pressOffset = nil; pressGrab = nil; keyboardOrigin = nil
         onPointerReleased?()
         revision += 1
         target = nil
@@ -76,8 +87,13 @@ final class CapturedWindowInput {
             if event.type != .scrollWheel { clear() }
             return false
         }
-        let point = Self.nativePoint(world: world, tile: proxy.worldRect, native: native.bounds)
-        let local = CGPoint(x: world.x - proxy.worldRect.minX, y: world.y - proxy.worldRect.minY)
+        var point = Self.nativePoint(world: world, tile: proxy.worldRect, native: native.bounds)
+        if event.type == .leftMouseDragged || event.type == .leftMouseUp, let pressOffset {
+            point = CGPoint(x: world.x + pressOffset.dx, y: world.y + pressOffset.dy)
+        }
+        if event.type == .leftMouseUp { pressOffset = nil; pressGrab = nil }
+        // Window-relative, against where the window is now (equal to the tile's when nothing moved).
+        let local = CGPoint(x: point.x - native.bounds.minX, y: point.y - native.bounds.minY)
         if event.type == .scrollWheel {
             // Hover scrolling has its own receiver. It never changes the app
             // or window selected for typing, including across app boundaries.
@@ -109,6 +125,10 @@ final class CapturedWindowInput {
             }
         }
         guard target === proxy else { return false }
+        if event.type == .leftMouseDown {   // after `prepare`, which clears the previous press
+            pressOffset = CGVector(dx: native.bounds.minX - proxy.worldRect.minX, dy: native.bounds.minY - proxy.worldRect.minY)
+            pressGrab = (world, proxy.worldRect.origin)
+        }
         let original: CGEvent
         if source.type == .leftMouseDown || source.type == .leftMouseUp || source.type == .leftMouseDragged {
             // Start a new window event rather than retaining AppKit's packed

@@ -2133,6 +2133,9 @@ final class CanvasView: NSView {
         return CGPoint(x: p.x, y: bounds.height - p.y)
     }
 
+    /// Where the pointer is on the canvas now, in world coordinates.
+    var pointerWorld: CGPoint { camera.toWorld(pointerTopLeft) }
+
     /// The edges of a window a screen point is on, for resizing it: never a widget's, and never where
     /// its floating controls are.
     private func resizeEdges(of p: WindowProxy?, at screenPoint: CGPoint) -> Resizing.Edges {

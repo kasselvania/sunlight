@@ -43,6 +43,8 @@ final class Desk {
         for (i, d) in displays.enumerated() { add(d, lead: i == 0) }
         Log.note("Displays: \(displays.map { "\($0.name) \(Int($0.frame.width))×\(Int($0.frame.height)) at \(Int($0.frame.minX)),\(Int($0.frame.minY))" }.joined(separator: "; "))")
         sourceBank?.onChange = { [weak self] in self?.canvases.forEach { $0.sourceBankChanged() } }
+        sourceBank?.isDragging = { [weak self] id in self?.canvases.contains { $0.capturedDrag(id) } ?? false }
+        sourceBank?.onDragged = { [weak self] p, delta in self?.canvases.first { $0.owns(p) }?.followCapturedDrag(p, by: delta) }
         sourceBank?.onFailure = { [weak self] text in
             guard let self else { return }
             CanvasToast.show(text, in: self.lead.overlay)

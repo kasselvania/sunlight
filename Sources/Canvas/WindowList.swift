@@ -49,6 +49,27 @@ enum WindowList {
                           alpha: (d[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1)
     }
 
+    /// Several windows in one window-server call, only those on screen: what the window bank reads
+    /// many times a second to keep its crops on the windows it holds.
+    nonisolated static func onScreen(_ ids: [CGWindowID]) -> [CGWindowID: WindowInfo] {
+        guard !ids.isEmpty else { return [:] }
+        var values = ids.map { UnsafeRawPointer(bitPattern: UInt($0)) }
+        guard let array = CFArrayCreate(nil, &values, values.count, nil),
+              let list = CGWindowListCreateDescriptionFromArray(array) as? [[String: Any]] else { return [:] }
+        var found: [CGWindowID: WindowInfo] = [:]
+        for d in list {
+            guard (d[kCGWindowIsOnscreen as String] as? Bool) == true,
+                  let id = (d[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let pid = (d[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                  let layer = (d[kCGWindowLayer as String] as? NSNumber)?.intValue,
+                  let b = d[kCGWindowBounds as String],
+                  let bounds = CGRect(dictionaryRepresentation: b as! CFDictionary) else { continue }
+            found[id] = WindowInfo(id: id, pid: pid, layer: layer, bounds: bounds, title: d[kCGWindowName as String] as? String,
+                                   alpha: (d[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1)
+        }
+        return found
+    }
+
     /// Whether a window still exists: on any Space, minimized or not. A fraction of a millisecond,
     /// and no app is asked anything.
     ///

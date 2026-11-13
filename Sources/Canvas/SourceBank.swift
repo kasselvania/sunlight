@@ -24,10 +24,18 @@ final class SourceBank {
     private var captureRevision = 0
     private var captureWork: DispatchWorkItem?
     private var banks: [CGDirectDisplayID: (bounds: CGRect, scale: CGFloat)] = [:]
+    private var placing = Set<CGWindowID>()
+    private var tracker: Timer?
     private(set) var phase = "idle"
     private(set) var error: String?
     var onChange: (() -> Void)?
     var onFailure: ((String) -> Void)?
+    /// Whether the user is dragging this window through its tile right now (a
+    /// captured press): its own title bar moving it moves its tile, as it would
+    /// a real window on the desktop, and it isn't re-slotted under the pointer.
+    var isDragging: ((CGWindowID) -> Bool)?
+    /// A dragged window moved natively by this much: its tile follows.
+    var onDragged: ((WindowProxy, CGVector) -> Void)?
 
     private let scope: Set<CGWindowID>? = {
         guard let at = CommandLine.arguments.firstIndex(of: "--sip-bank-only") else { return nil }
@@ -139,15 +147,19 @@ final class SourceBank {
     }
 
     /// Release through the host before existing native-handoff code places the
-    /// original on a physical display. The host's restoration record retires only
-    /// after its original position has actually been observed.
-    func release(_ p: WindowProxy) async -> Bool {
+    /// original on a physical display. `to` (Accessibility's global top-left) is
+    /// where the handoff will put it: the host takes it straight there from its
+    /// slot, at its current size. Without it, the window goes back to where it
+    /// was before parking. The record retires only once the move is observed.
+    func release(_ p: WindowProxy, to: CGPoint? = nil) async -> Bool {
         guard contains(p.windowID) else { return true }
         guard !releasing.contains(p.windowID) else { return false }
         releasing.insert(p.windowID)
         defer { releasing.remove(p.windowID) }
         native.insert(p.windowID)
-        let reply = await ask("release", values: ["id": p.windowID])
+        var values: [String: Any] = ["id": p.windowID]
+        if let to { values["x"] = Double(to.x); values["y"] = Double(to.y) }
+        let reply = await ask("release", values: values)
         if let text = reply["error"] as? String { native.remove(p.windowID); fail(text); return false }
         entries[p.windowID] = nil
         p.endBankCapture()
@@ -158,7 +170,92 @@ final class SourceBank {
 
     func returnToCanvas() { native.removeAll() }
 
+    // MARK: Geometry ownership
+
+    /// The bank's record of each window follows the real window, many times a
+    /// second: the crop is cut from it, so the picture shows what input reaches.
+    private func startTracking() {
+        tracker?.invalidate()
+        let t = Timer(timeInterval: 1.0 / 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.track() }
+        }
+        RunLoop.main.add(t, forMode: .common)   // also while a drag or resize tracks the mouse
+        tracker = t
+    }
+
+    private func stopTracking() { tracker?.invalidate(); tracker = nil }
+
+    private func track() {
+        guard phase == "running", !entries.isEmpty else { return }
+        let ids = entries.keys.filter { !placing.contains($0) && !releasing.contains($0) && !native.contains($0) }
+        let live = WindowList.onScreen(Array(ids))
+        var refeed = false
+        var reslot: CGWindowID?
+        for id in ids {
+            guard let entry = entries[id], let info = live[id], info.pid == entry.record.process.pid,
+                  let displayID = entry.record.displayID, let bank = banks[displayID]?.bounds else { continue }
+            let neighbours = entries.values.filter { $0.record.id != id && $0.record.displayID == displayID }.map(\.record.native)
+            let dragging = isDragging?(id) == true
+            let recorded = entry.record.native
+            let drift = SourceBankGeometry.drift(live: info.bounds, recorded: recorded, bank: bank, neighbours: neighbours)
+            if drift == .same { continue }
+            if !info.bounds.isClose(to: recorded) {
+                follow(id, to: info.bounds, from: recorded, dragging: dragging)
+                if !(captures[displayID]?.source.contains(info.bounds) ?? false) { refeed = true }
+            }
+            // Not under the pointer: a window dragged off its bank goes back once it's let go.
+            if case .reslot = drift, !dragging, placing.isEmpty, reslot == nil { reslot = id }
+        }
+        if let reslot { self.reslot(reslot) }
+        if refeed { scheduleCapture() }
+    }
+
+    /// The record takes the window's live frame, so its crop is cut from where
+    /// the window really is. A drag through the tile carries the tile along;
+    /// otherwise the tile keeps its place and takes the window's new size.
+    private func follow(_ id: CGWindowID, to frame: CGRect, from recorded: CGRect, dragging: Bool) {
+        guard let entry = entries[id] else { return }
+        var record = entry.record
+        record.native = frame
+        entries[id] = Entry(proxy: entry.proxy, record: record)
+        guard let p = entry.proxy else { return }
+        if dragging, frame.origin != recorded.origin {
+            onDragged?(p, CGVector(dx: frame.minX - recorded.minX, dy: frame.minY - recorded.minY))
+        }
+        // A resize of the canvas's own is still settling: the canvas has the size.
+        if !p.sizeHeld { p.placedNatively(at: frame) }
+    }
+
+    /// Moves a window that outgrew its slot, or left its bank, to a free slot.
+    /// One at a time; a window that fits nowhere leaves the bank for its
+    /// original place, as one too large to park does.
+    private func reslot(_ id: CGWindowID) {
+        placing.insert(id)
+        Task { [weak self] in
+            guard let self else { return }
+            let reply = await self.ask("place", values: ["id": id])
+            self.placing.remove(id)
+            guard self.phase == "running", let entry = self.entries[id] else { return }
+            if let text = reply["error"] as? String {
+                Log.note("Window bank: re-slot \(id): \(text)")
+                if text == SourceBankHost.noRoom, let p = entry.proxy {
+                    self.refused[id] = text
+                    _ = await self.release(p)
+                    self.native.remove(id)
+                }
+                return
+            }
+            guard let object = reply["record"], let data = try? JSONSerialization.data(withJSONObject: object),
+                  let record = try? JSONDecoder().decode(BankRecord.self, from: data) else { return }
+            self.entries[id] = Entry(proxy: entry.proxy, record: record)
+            entry.proxy?.placedNatively(at: record.native)
+            Log.note("Window bank: \(id) re-slotted to \(NSStringFromRect(record.native))")
+            self.scheduleCapture()
+        }
+    }
+
     func stop() async -> Bool {
+        stopTracking()
         captureWork?.cancel(); captureWork = nil
         captureRevision += 1; stopCaptures()
         guard process != nil else {
@@ -208,6 +305,7 @@ final class SourceBank {
             SIPRedesign.sourceDisplayIDs = Set(banks.keys)
             retireRestoredEntries()
             phase = "running"
+            startTracking()
             finishReadiness(); onChange?()
         case "reply":
             if let id = value["request"] as? Int { requests.removeValue(forKey: id)?.resume(returning: value) }
@@ -231,6 +329,7 @@ final class SourceBank {
 
     private func ended(session: String) {
         guard session == token else { return }
+        stopTracking()
         process = nil; input = nil
         finishReadiness()
         for reply in requests.values { reply.resume(returning: ["error": "The source-bank host exited."]) }
@@ -290,8 +389,9 @@ final class SourceBank {
                     guard let display = content.displays.first(where: { $0.displayID == id }) else { self.captureFailed("A source display is unavailable."); return }
                     let windows = records.compactMap { record in content.windows.first { $0.windowID == record.id && $0.owningApplication?.processID == record.process.pid } }
                     guard windows.count == records.count else { self.scheduleCapture(); return }
-                    let source = records.map(\.native).reduce(CGRect.null) { $0.union($1) }.integral
-                    guard display.frame.contains(source) else { self.captureFailed("A banked window moved outside its capture display."); return }
+                    // Headroom around the windows, so their moves and resizes stay inside this feed.
+                    let source = SourceBankGeometry.feedSource(windows: records.map(\.native), display: display.frame)
+                    guard !source.isEmpty else { continue }
                     let feed = SourceBankCapture(display: display, source: source, scale: bank.scale,
                                                  fps: SIPRedesign.frameRate(displayID: CGMainDisplayID()))
                     feed.onFrame = { [weak self, weak feed] buffer, region in

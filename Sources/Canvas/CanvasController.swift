@@ -686,6 +686,28 @@ final class CanvasController {
         scheduleCapturePass()
     }
 
+    /// The window is this canvas's.
+    func owns(_ p: WindowProxy) -> Bool { proxies[p.windowID] === p }
+
+    /// A press through this window's tile is down.
+    func capturedDrag(_ id: CGWindowID) -> Bool { capturedInput.isDragging(id) }
+
+    /// The app is dragging its window under a press through its tile (its own title bar, toolbar or
+    /// tab strip): the tile follows the pointer, as the window would on the desktop. Not the native
+    /// delta: an app that starts the drag itself (`performWindowDrag`, as Firefox- and Chromium-based
+    /// browsers do) has the window server follow the real pointer in screen points, which differ from
+    /// world points whenever the canvas isn't at 1:1. The bank re-slots the window once it's let go.
+    func followCapturedDrag(_ p: WindowProxy, by delta: CGVector) {
+        guard owns(p), let grab = capturedInput.grab(p.windowID) else { return }
+        let pointer = view.pointerWorld
+        let origin = CGPoint(x: grab.tile.x + pointer.x - grab.world.x, y: grab.tile.y + pointer.y - grab.world.y)
+        guard origin.x.isFinite, origin.y.isFinite, origin != p.worldRect.origin else { return }
+        p.tile = nil
+        p.place(at: origin)
+        minimap.redraw()
+        rememberSoon()
+    }
+
     var redesignStatus: [String: Any] {
         ["window_id": window.windowNumber, "display_id": display.id,
          "camera": ["x": view.camera.origin.x, "y": view.camera.origin.y, "zoom": view.camera.zoom],
@@ -4766,8 +4788,15 @@ final class CanvasController {
     func handoff(to p: WindowProxy, placement: Placement = .centered, spatial: Bool = false, gliding from: CGPoint? = nil) {
         guard !handingOff, p.kind == .window else { return letGo(p) }
         if let bank = desk?.sourceBank, bank.contains(p.windowID) {
+            // Straight from its slot to where the entry below puts it, at the size the canvas gave it.
+            // A sheet's parent or a PiP tile has its own way in: those go back to their original place.
+            var to: CGPoint?
+            if parentOf(p) == nil, p.pip == nil {
+                to = toGlobal(Handoff.plan(placement, rect: p.worldRect, camera: view.camera, visible: visibleTopLeft,
+                                           scale: scale, tiledArea: tiledArea(of: p)).origin)
+            }
             Task { [weak self, weak p] in
-                guard let self, let p, await bank.release(p) else { return }
+                guard let self, let p, await bank.release(p, to: to) else { return }
                 self.handoff(to: p, placement: placement, spatial: spatial, gliding: from)
             }
             return
