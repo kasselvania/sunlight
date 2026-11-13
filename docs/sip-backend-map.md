@@ -361,6 +361,30 @@ an `NSAlert` sheet:
 - Hover highlighting inside a menu does not follow the pointer (menus track the real pointer).
   Right-click over a tile shows Sunlight's own menu, as in Sunlight proper.
 
+**Finished menus (run live 2026-11-13, owner hands-off).**
+
+- Menus and popovers that extend past their window's frame are drawn in full: while a banked app is
+  in front, `SourceBank.track` lists its raised windows, assigns each to the window it belongs to
+  (`SourceBankGeometry.raisedParent`), keeps them inside the feed (`feedSource` includes them), and
+  hands them to the tile with each frame. `WindowProxy` draws each as an overlay layer above the bank
+  content (`overlayFrame`, corners clipped at 10 pt), free to overhang the tile; `raisedWorldRects`
+  makes a press there the tile's input (`CanvasView.capturedInputTarget`).
+- A press on an open menu now chooses on the press, not the release: with a menu open, the release
+  often never came back to the canvas. Each press arrives twice (the panel's hook and the view);
+  the repeat is ignored, and the menu must still be open when the press lands
+  (`pressRaised`), so the second never reaches a control in the window underneath.
+- Live, a ten-item menu overhanging its tile by about 160 pt: drawn in full; **10 of 10 items chosen
+  with a single first click**, top, middle and bottom, plus 3 of 3 on the final build. Ten duplicate
+  presses ignored; no stray actions in the window underneath.
+
+**Found: ordinary button clicks through a tile are unreliable.** Eight open-and-close cycles of a
+sheet from its "Sheet…" button: the sheet opened 5–6 times of 8, and its OK/Cancel click closed it
+3–5 times. It made no difference whether grabbed presses were returned (an A/B switch), whether
+menus had been used, or whether the synthetic click was held 60 or 150 ms. In the failures the
+press reached the window and its release never did, so the button stayed held. This is in the
+existing input path (`CapturedInputEvents`, `CapturedWindowInput`), not in the menu work, and is the
+next thing to fix. It was measured with synthetic HID clicks; real trackpad clicks are unmeasured.
+
 **Consent prompts.** During these runs macOS showed "Sunlight Canvas Lab is requesting to bypass the
 system private window picker and directly access your screen and audio" six times, never answered
 (the owner was away). The first came on the run that first measured corners through SkyLight

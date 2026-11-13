@@ -99,6 +99,27 @@ final class SourceBankGeometryTests: XCTestCase {
         XCTAssertNil(SourceBankGeometry.cornerRadius(alpha: [UInt8](repeating: 0, count: 200 * 100), width: 200, height: 100))
     }
 
+    func testARaisedWindowBelongsToTheWindowItOverlapsMostOrTheNearestOne() {
+        let a = CGRect(x: 0, y: 0, width: 700, height: 450), b = CGRect(x: 716, y: 0, width: 700, height: 450)
+        let windows: [(id: CGWindowID, frame: CGRect)] = [(1, a), (2, b)]
+        // A menu hanging off A's bottom edge, mostly outside it.
+        XCTAssertEqual(SourceBankGeometry.raisedParent(CGRect(x: 40, y: 420, width: 220, height: 200), among: windows), 1)
+        // A popover straddling both, more of it over B.
+        XCTAssertEqual(SourceBankGeometry.raisedParent(CGRect(x: 650, y: 100, width: 300, height: 100), among: windows), 2)
+        // Just below A, touching nothing: the nearest; far away: none.
+        XCTAssertEqual(SourceBankGeometry.raisedParent(CGRect(x: 40, y: 470, width: 200, height: 100), among: windows), 1)
+        XCTAssertNil(SourceBankGeometry.raisedParent(CGRect(x: 40, y: 1400, width: 200, height: 100), among: windows))
+    }
+
+    func testOverlayFrameIsTheRaisedWindowsOffsetInTheTilesYUpSpace() {
+        let parent = CGRect(x: -5404, y: 64, width: 700, height: 450)
+        // A menu 165 pt below the parent's top, overhanging its bottom by 50 pt.
+        let menu = CGRect(x: -5392, y: 229, width: 220, height: 335)
+        let f = SourceBankGeometry.overlayFrame(raised: menu, parent: parent, tileHeight: 450)
+        XCTAssertEqual(f, CGRect(x: 12, y: 450 - 165 - 335, width: 220, height: 335))
+        XCTAssertLessThan(f.minY, 0)   // below the tile's bottom edge: drawn past it
+    }
+
     func testProcessIdentityDoesNotTreatAnAbsentProcessAsItsFormerOwner() {
         XCTAssertTrue(BankProcess(getpid())!.isLive)
         XCTAssertNil(BankProcess(Int32.max))

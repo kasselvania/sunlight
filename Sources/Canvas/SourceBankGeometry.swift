@@ -123,6 +123,28 @@ enum SourceBankGeometry {
         return (CGFloat(min(topLeft, bottomLeft)) / (1 - 1 / 2.0.squareRoot()), right - left + 1)
     }
 
+    /// Which banked window a raised window (a menu, pop-up list, popover) of the same app belongs to:
+    /// the one it overlaps most, else the nearest within `reach` points. Nil when none is close.
+    static func raisedParent(_ raised: CGRect, among windows: [(id: CGWindowID, frame: CGRect)], reach: CGFloat = 240) -> CGWindowID? {
+        func area(_ r: CGRect) -> CGFloat { r.isNull ? 0 : r.width * r.height }
+        if let best = windows.max(by: { area($0.frame.intersection(raised)) < area($1.frame.intersection(raised)) }),
+           area(best.frame.intersection(raised)) > 0 { return best.id }
+        func gap(_ a: CGRect) -> CGFloat {
+            let dx = max(0, max(a.minX - raised.maxX, raised.minX - a.maxX))
+            let dy = max(0, max(a.minY - raised.maxY, raised.minY - a.maxY))
+            return hypot(dx, dy)
+        }
+        guard let nearest = windows.min(by: { gap($0.frame) < gap($1.frame) }), gap(nearest.frame) <= reach else { return nil }
+        return nearest.id
+    }
+
+    /// Where a raised window's overlay goes in its parent tile's layer: Core Animation's y-up space,
+    /// origin at the tile's bottom-left, world units (points) at any zoom. Native frames are top-left.
+    static func overlayFrame(raised: CGRect, parent: CGRect, tileHeight: CGFloat) -> CGRect {
+        let dx = raised.minX - parent.minX, dy = raised.minY - parent.minY
+        return CGRect(x: dx, y: tileHeight - dy - raised.height, width: raised.width, height: raised.height)
+    }
+
     /// An image's alpha channel, one byte per pixel, row-major from the top.
     static func alpha(of image: CGImage) -> [UInt8]? {
         let w = image.width, h = image.height

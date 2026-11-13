@@ -2293,6 +2293,12 @@ final class CanvasView: NSView {
     /// ⌥ ⌘ ⌃ held (they pan and zoom over windows), off the title strip, the edges, its controls and
     /// whatever covers the canvas. Asked on every move while the pointer is through, too.
     private func capturedInputTarget(at point: CGPoint) -> WindowProxy? {
+        // An app's open menu or popover drawn over its tile, overhanging it or not: the tile's input,
+        // which presses what's under the point in that menu (`CapturedWindowInput`).
+        if SIPRedesign.enabled, !showsRealWindows, isCovered?(point) != true,
+           let owner = proxies.last(where: { $0.kind == .window && $0.raisedHit(camera.toWorld(point)) }) {
+            return owner
+        }
         guard SIPRedesign.enabled, !showsRealWindows, isCovered?(point) != true,
               let proxy = proxy(at: camera.toWorld(point)), proxy.kind == .window,
               proxy.drawnPip == nil, proxy.control(at: camera.toWorld(point)) == nil,

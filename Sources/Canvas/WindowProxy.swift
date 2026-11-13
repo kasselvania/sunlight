@@ -652,7 +652,27 @@ final class WindowProxy {
     func beginBankCapture() { stopCapture(); bankCapture = true }
     /// The last bank frame stays up until another source's first frame replaces it (`show`), so a
     /// window leaving the bank (a handoff's flight) never shows an empty tile.
-    func endBankCapture() { bankCapture = false }
+    func endBankCapture() { bankCapture = false; clearRaised() }
+
+    /// The app's raised windows over this one (menus, pop-up lists, popovers), drawn from the same bank
+    /// frame above the tile and free to overhang its edges: inside the crop they're already in the
+    /// picture, but one that reaches past the window's frame was cut at the tile's edge.
+    private var raisedLayers: [CGWindowID: CALayer] = [:]
+    /// The raised windows' places in the world, for hit testing: a press on an overhanging menu is
+    /// this tile's input (`CanvasView.capturedInputTarget`).
+    private(set) var raisedWorldRects: [CGRect] = []
+
+    /// A raised window's corners: menus and popovers are rounded, and a crop of the shared feed has
+    /// whatever is behind them on the bank in its corners.
+    static let raisedCornerRadius: CGFloat = 10
+
+    private func clearRaised() {
+        for l in raisedLayers.values { l.removeFromSuperlayer() }
+        raisedLayers.removeAll()
+        raisedWorldRects = []
+    }
+
+    func raisedHit(_ world: CGPoint) -> Bool { raisedWorldRects.contains { $0.contains(world) } }
 
     /// Bank frames go to their own layer, clipped to the window's corners: a shared display feed has no
     /// alpha, so whatever is behind the window on its bank fills the corners of a rectangular crop.
@@ -691,12 +711,43 @@ final class WindowProxy {
 
     // SIP PERFORMANCE: shared-buffer layer application and lifetime entry point.
     // See docs/sip-redesign-performance.md; retain currentBuffer while displayed.
-    func applyBankFrame(_ buffer: CVPixelBuffer, crop: CGRect) {
+    /// `raised`: the app's raised windows over this one, each with its crop in the frame and its place in
+    /// this tile's layer (`SourceBankGeometry.overlayFrame`).
+    func applyBankFrame(_ buffer: CVPixelBuffer, crop: CGRect, raised: [(id: CGWindowID, crop: CGRect, frame: CGRect)] = []) {
         guard bankCapture, let surface = CVPixelBufferGetIOSurface(buffer)?.takeUnretainedValue() else { return }
         let content = bankContentLayer()
         content.contents = surface
         content.contentsRect = crop
         currentBuffer = buffer
+        if !raised.isEmpty || !raisedLayers.isEmpty {
+            let wanted = Set(raised.map(\.id))
+            for (id, l) in raisedLayers where !wanted.contains(id) { l.removeFromSuperlayer(); raisedLayers[id] = nil }
+            var rects: [CGRect] = []
+            for r in raised {
+                let l = raisedLayers[r.id] ?? {
+                    let l = CALayer()
+                    l.anchorPoint = .zero
+                    l.contentsGravity = .resize
+                    l.contentsScale = scale
+                    l.magnificationFilter = .linear
+                    l.minificationFilter = .linear
+                    l.masksToBounds = true
+                    l.cornerRadius = WindowProxy.raisedCornerRadius
+                    l.cornerCurve = .continuous
+                    l.actions = ["contents": NSNull(), "contentsRect": NSNull(), "bounds": NSNull(), "position": NSNull()]
+                    layer.insertSublayer(l, above: content)
+                    raisedLayers[r.id] = l
+                    return l
+                }()
+                l.frame = r.frame
+                l.contents = surface
+                l.contentsRect = r.crop
+                // Back to the world: the tile's top-left plus the overlay's offset (y down).
+                rects.append(CGRect(x: worldRect.minX + r.frame.minX, y: worldRect.minY + worldRect.height - r.frame.maxY,
+                                    width: r.frame.width, height: r.frame.height))
+            }
+            raisedWorldRects = rects
+        }
         if !hasFrame {
             hasFrame = true
             layer.backgroundColor = nil
@@ -762,6 +813,7 @@ final class WindowProxy {
             // Another source's frame: the bank's last one, kept through the handoff, goes.
             bankContent?.removeFromSuperlayer()
             bankContent = nil
+            clearRaised()
         }
         layer.contents = contents
         if !hasFrame {

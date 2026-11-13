@@ -26,6 +26,9 @@ final class SourceBank {
     private var banks: [CGDirectDisplayID: (bounds: CGRect, scale: CGFloat)] = [:]
     private var placing = Set<CGWindowID>()
     private var skipped: [CGWindowID: String] = [:]
+    /// The raised windows (menus, pop-up lists, popovers) of the banked app in front, by the banked
+    /// window each belongs to (`SourceBankGeometry.raisedParent`). Drawn over that window's tile.
+    private var raisedByParent: [CGWindowID: [WindowInfo]] = [:]
     /// The size each window's corners were last measured at (`measureCorners`).
     private var cornersMeasured: [CGWindowID: CGSize] = [:]
     /// When each banked window last moved or resized natively: of two that overlap, the one that
@@ -231,6 +234,20 @@ final class SourceBank {
             follow(id, to: info.bounds, from: recorded, dragging: isDragging?(id) == true)
             if !(captures[displayID]?.source.contains(info.bounds) ?? false) { refeed = true }
         }
+        // The banked app in front: its raised windows, and room for them in the feed.
+        var raised: [CGWindowID: [WindowInfo]] = [:]
+        if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+           entries.values.contains(where: { $0.record.process.pid == front }) {
+            let mine = entries.values.filter { $0.record.process.pid == front }
+            let candidates = mine.map { (id: $0.record.id, frame: $0.record.native) }
+            for w in WindowList.onScreen() where w.pid == front && w.layer > 0 && w.layer < 1000
+                && banks.values.contains(where: { $0.bounds.intersects(w.bounds) }) {
+                guard let parent = SourceBankGeometry.raisedParent(w.bounds, among: candidates) else { continue }
+                raised[parent, default: []].append(w)
+                if let display = entries[parent]?.record.displayID, !(captures[display]?.source.contains(w.bounds) ?? false) { refeed = true }
+            }
+        }
+        raisedByParent = raised
         if refeed { scheduleCapture() }
         guard placing.isEmpty else { return }
         var reslot: [CGWindowID] = []
@@ -488,14 +505,23 @@ final class SourceBank {
                     let windows = records.compactMap { record in content.windows.first { $0.windowID == record.id && $0.owningApplication?.processID == record.process.pid } }
                     guard windows.count == records.count else { self.scheduleCapture(); return }
                     // Headroom around the windows, so their moves and resizes stay inside this feed.
-                    let source = SourceBankGeometry.feedSource(windows: records.map(\.native), display: display.frame)
+                    let raisedHere = records.flatMap { self.raisedByParent[$0.id] ?? [] }.map(\.bounds)
+                    let source = SourceBankGeometry.feedSource(windows: records.map(\.native) + raisedHere, display: display.frame)
                     guard !source.isEmpty else { continue }
                     let feed = SourceBankCapture(display: display, source: source, scale: bank.scale,
                                                  fps: SIPRedesign.frameRate(displayID: CGMainDisplayID()))
                     feed.onFrame = { [weak self, weak feed] buffer, region in
                         guard let self, self.captures[id] === feed else { return }
                         for entry in self.entries.values where entry.record.displayID == id && region.contains(entry.record.native) {
-                            entry.proxy?.applyBankFrame(buffer, crop: SourceBankGeometry.crop(window: entry.record.native, source: region))
+                            let native = entry.record.native
+                            let tile = entry.proxy?.worldRect.size ?? native.size
+                            let sx = tile.width / max(1, native.width), sy = tile.height / max(1, native.height)
+                            let raised = (self.raisedByParent[entry.record.id] ?? []).filter { region.contains($0.bounds) }.map { w in
+                                let o = SourceBankGeometry.overlayFrame(raised: w.bounds, parent: native, tileHeight: native.height)
+                                return (id: w.id, crop: SourceBankGeometry.crop(window: w.bounds, source: region),
+                                        frame: CGRect(x: o.minX * sx, y: o.minY * sy, width: o.width * sx, height: o.height * sy))
+                            }
+                            entry.proxy?.applyBankFrame(buffer, crop: SourceBankGeometry.crop(window: native, source: region), raised: raised)
                         }
                     }
                     feed.onError = { [weak self, weak feed] text in

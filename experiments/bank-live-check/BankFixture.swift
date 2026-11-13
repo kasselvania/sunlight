@@ -77,6 +77,12 @@ final class Delegate: NSObject, NSApplicationDelegate, NSToolbarDelegate {
             popup.target = self
             popup.action = #selector(chose(_:))
             v.addSubview(popup)
+            // A long menu near the bottom: it hangs past the window's frame when open.
+            let long = NSPopUpButton(frame: NSRect(x: 24, y: 380, width: 220, height: 30), pullsDown: false)
+            long.addItems(withTitles: (1...10).map { "\(name) long \($0)" })
+            long.target = self
+            long.action = #selector(chose(_:))
+            v.addSubview(long)
             // A sheet: a window of the app's at the normal level, attached over this one.
             let sheet = NSButton(title: "Sheet…", target: self, action: #selector(showSheet(_:)))
             sheet.frame = NSRect(x: 260, y: 170, width: 100, height: 30)

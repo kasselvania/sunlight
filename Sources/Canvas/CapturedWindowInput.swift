@@ -25,6 +25,8 @@ final class CapturedWindowInput {
     private var pressOffset: CGVector?
     /// Where the press landed (world) and where its tile was then.
     private var pressGrab: (world: CGPoint, tile: CGPoint)?
+    /// The last press handled over a raised window, to drop its duplicate.
+    private var lastRaisedPress: (time: CFTimeInterval, point: CGPoint)?
     private let isolation = CapturedInputIsolation()
     private let inputEvents = CapturedInputEvents()
     private let postedSource = CGEventSource(stateID: .privateState)
@@ -137,17 +139,19 @@ final class CapturedWindowInput {
         // An open menu (or other raised window) of the app's under the press: menus track the real
         // pointer, which is over the canvas on the physical display, not over the menu on the bank, so
         // a posted click read as one outside it and closed it unchosen (measured 2026-11-13). The item
-        // under the click is pressed through Accessibility on release instead, and nothing is posted.
+        // under the press is pressed through Accessibility, and nothing is posted. On the press, not the
+        // release: with a menu open the release often never came back to the canvas (2 of 5 lost).
+        // A press arrives twice (the panel's hook and the view); the second is ignored.
         if let over, over.layer > 0,
            [.leftMouseDown, .leftMouseDragged, .leftMouseUp].contains(event.type) {
-            if event.type != .leftMouseDragged {
-                Log.note("Captured input: \(event.type == .leftMouseDown ? "press" : "release") over raised window \(over.id) (layer \(over.layer)) at \(NSStringFromPoint(point))")
+            if event.type == .leftMouseDown {
+                let now = CACurrentMediaTime()
+                let repeated = lastRaisedPress.map { now - $0.time < 0.3 && hypot($0.point.x - point.x, $0.point.y - point.y) < 4 } ?? false
+                lastRaisedPress = (now, point)
+                Log.note("Captured input: press over raised window \(over.id) (layer \(over.layer)) at \(NSStringFromPoint(point))\(repeated ? ", repeat ignored" : "")")
+                if !repeated { Self.pressRaised(pid: proxy.pid, at: point) }
             }
-            if event.type == .leftMouseUp { Self.pressRaised(pid: proxy.pid, at: point) }
             return true
-        }
-        if let over, event.type == .leftMouseDown || event.type == .leftMouseUp {
-            Log.note("Captured input: \(event.type == .leftMouseDown ? "press" : "release") to window \(over.id) in front of \(proxy.windowID) at local \(NSStringFromPoint(local))")
         }
         if event.type == .leftMouseDown {   // after `prepare`, which clears the previous press
             pressOffset = CGVector(dx: native.bounds.minX - proxy.worldRect.minX, dy: native.bounds.minY - proxy.worldRect.minY)
@@ -192,6 +196,11 @@ final class CapturedWindowInput {
     /// checkbox or radio button in a raised window. Off the main thread; anything else is left alone.
     nonisolated static func pressRaised(pid: pid_t, at point: CGPoint) {
         AXQueue.interactive.async {
+            // Still open: once it closes, the same point can be a control in the window under it.
+            guard WindowList.onScreen().contains(where: { $0.pid == pid && $0.layer > 0 && $0.bounds.contains(point) }) else {
+                Log.note("Captured input: the raised window at \(NSStringFromPoint(point)) has closed; nothing pressed")
+                return
+            }
             let app = AXUIElementCreateApplication(pid)
             var element: AXUIElement?
             let hit = AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &element)

@@ -76,8 +76,9 @@ case "dclick":
     post(.leftMouseDown, p, clicks: 2); usleep(40_000); post(.leftMouseUp, p, clicks: 2)
 case "click":
     let p = CGPoint(x: d(2), y: d(3))
+    let hold = a.count > 4 ? useconds_t(Double(a[4])! * 1000) : 60_000   // optional hold, ms
     post(.mouseMoved, p); usleep(150_000)
-    post(.leftMouseDown, p); usleep(60_000); post(.leftMouseUp, p)
+    post(.leftMouseDown, p); usleep(hold); post(.leftMouseUp, p)
 case "dockitem":
     guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { exit(1) }
     func items(_ e: AXUIElement, _ depth: Int) -> [AXUIElement] {
