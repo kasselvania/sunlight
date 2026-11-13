@@ -4,6 +4,8 @@
 //   axframe <pid> <id>         AX frame of a window
 //   drag <x1> <y1> <x2> <y2>   left-button drag in 30 steps
 //   dclick <x> <y>             double-click
+//   click <x> <y>              single click
+//   dockitem <title>           centre of a Dock icon (global top-left), by its title
 //   mouse                      current pointer location
 //   moveto <x> <y>             move pointer
 //   menu <pid> <x> <y> <a>[/<b>]  right-click, then press menu item a (and b in its submenu) of process pid
@@ -71,6 +73,25 @@ case "dclick":
     post(.mouseMoved, p); usleep(150_000)
     post(.leftMouseDown, p, clicks: 1); usleep(40_000); post(.leftMouseUp, p, clicks: 1); usleep(80_000)
     post(.leftMouseDown, p, clicks: 2); usleep(40_000); post(.leftMouseUp, p, clicks: 2)
+case "click":
+    let p = CGPoint(x: d(2), y: d(3))
+    post(.mouseMoved, p); usleep(150_000)
+    post(.leftMouseDown, p); usleep(60_000); post(.leftMouseUp, p)
+case "dockitem":
+    guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { exit(1) }
+    func items(_ e: AXUIElement, _ depth: Int) -> [AXUIElement] {
+        var kids: CFTypeRef?
+        guard depth > 0, AXUIElementCopyAttributeValue(e, kAXChildrenAttribute as CFString, &kids) == .success else { return [] }
+        let list = (kids as? [AXUIElement]) ?? []
+        return list + list.flatMap { items($0, depth - 1) }
+    }
+    for e in items(AXUIElementCreateApplication(dock.processIdentifier), 3) {
+        var t: CFTypeRef?
+        AXUIElementCopyAttributeValue(e, kAXTitleAttribute as CFString, &t)
+        guard (t as? String) == a[2], let f = axFrame(e) else { continue }
+        print(f.midX, f.midY); exit(0)
+    }
+    print("not found"); exit(1)
 case "mouse":
     let l = CGEvent(source: nil)!.location
     print(l.x, l.y)

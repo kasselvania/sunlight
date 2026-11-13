@@ -25,6 +25,7 @@ final class SourceBank {
     private var captureWork: DispatchWorkItem?
     private var banks: [CGDirectDisplayID: (bounds: CGRect, scale: CGFloat)] = [:]
     private var placing = Set<CGWindowID>()
+    private var skipped: [CGWindowID: String] = [:]
     /// When each banked window last moved or resized natively: of two that overlap, the one that
     /// changed last is the one that ran into the other, and it alone is re-slotted.
     private var changedAt: [CGWindowID: CFTimeInterval] = [:]
@@ -60,6 +61,8 @@ final class SourceBank {
                     "display_id": $0.record.displayID ?? 0,
                     "original": NSStringFromRect($0.record.originalCG), "native": NSStringFromRect($0.record.native)] },
          "pending": pending.sorted(), "refused": refused.map { ["id": $0.key, "reason": $0.value] },
+         "entered": native.sorted(), "placing": placing.sorted(), "scope": scope.map { $0.sorted() } ?? [],
+         "skipped": skipped.map { ["id": $0.key, "reason": $0.value] },
          "error": error ?? ""]
     }
 
@@ -131,16 +134,25 @@ final class SourceBank {
             p.placedNatively(at: entry.record.native)
             p.beginBankCapture()
         }
-        for p in proxies where p.kind == .window && p.attachedTo == nil && p.away == nil && !p.leaving
-            && !protects(p.windowID) && !native.contains(p.windowID) && refused[p.windowID] == nil
-            && (scope?.contains(p.windowID) ?? true) {
-            guard let real = WindowList.onScreen(p.windowID), !banks.values.contains(where: { $0.bounds.intersects(real.bounds) }) else { continue }
+        for p in proxies where p.kind == .window && !protects(p.windowID) && (scope?.contains(p.windowID) ?? true) {
+            // Why a window stays out of the bank, for the status file.
+            let reason = p.attachedTo != nil ? "attached" : p.away != nil ? "away" : p.leaving ? "leaving"
+                : native.contains(p.windowID) ? "entered" : refused[p.windowID] != nil ? "refused" : nil
+            if let reason { skipped[p.windowID] = reason; continue }
+            guard let real = WindowList.onScreen(p.windowID) else { skipped[p.windowID] = "not on screen"; continue }
+            skipped[p.windowID] = nil
+            // Already on a source display but not banked: macOS puts a window back on the display it
+            // was last on when that display returns, and the banks keep fixed identities across
+            // launches. Adopted, with a restoration place on a physical display, rather than left there
+            // untracked (streamed on its own, its crop and input unowned, lost when the bank closes).
+            let adopt = banks.values.contains(where: { $0.bounds.intersects(real.bounds) })
+            if adopt { Log.note("Window bank: \(p.appName) — \(p.title) is already on a source display at \(NSStringFromRect(real.bounds)); adopting it") }
             pending.insert(p.windowID)
             let id = p.windowID
             Task { [weak self, weak p] in
                 guard let self else { return }
                 guard let p else { self.pending.remove(id); return }
-                let reply = await self.ask("park", values: ["id": p.windowID, "pid": p.pid])
+                let reply = await self.ask("park", values: ["id": p.windowID, "pid": p.pid, "adopt": adopt])
                 if self.phase != "stopping" { self.pending.remove(p.windowID) }
                 if let text = reply["error"] as? String {
                     self.refused[p.windowID] = text

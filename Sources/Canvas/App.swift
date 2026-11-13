@@ -267,6 +267,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
                     return
                 }
                 self.sipStatusTimer?.invalidate()
+                self.takeover?.stopWatcherOnly()
                 self.canvas?.shutdown()
                 self.canvas?.remember()
                 SIPRedesign.publish(["phase": "stopped", "pid": getpid(), "app_path": Bundle.main.bundlePath,
@@ -320,6 +321,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation, 
         status.menu = commands.copy() as? NSMenu
         sipStatusItem = status
         desk.show()
+        // Activation from outside the canvas (Dock, ⌘Tab, Spotlight) reaches the canvas's own handling.
+        let takeover = TakeoverMode(canvas: desk)
+        self.takeover = takeover
+        desk.takeover = takeover
+        takeover.startWatcherOnly()
         if let error = bank.error { CanvasToast.show(error, in: desk.lead.overlay) }
         sipStatusTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {

@@ -395,6 +395,7 @@ final class CanvasController {
         }
         capturedInput.onPointerReleased = { [weak self] in self?.view.releaseCapturedPress() }
         capturedInput.onFocused = { [weak self] in self?.window.resignKey() }
+        capturedInput.onWillFocus = { [weak self] pid in self?.capturedFocus(pid) }
         capturedInput.onCanvasEvent = { [weak self] event in
             guard let self, self.window.isVisible,
                   event.getIntegerValueField(CGEventField(rawValue: 51)!) == Int64(self.window.windowNumber) else { return false }
@@ -716,7 +717,8 @@ final class CanvasController {
          "windows": view.proxies.filter { $0.kind == .window }.map {
              ["id": $0.windowID, "pid": $0.pid, "world": NSStringFromRect($0.worldRect),
               "screen": NSStringFromRect(view.camera.toScreen($0.worldRect)),
-              "streaming": $0.isStreaming, "has_frame": $0.hasFrame] as [String: Any]
+              "streaming": $0.isStreaming, "has_frame": $0.hasFrame,
+              "attached_to": $0.attachedTo ?? 0, "leaving": $0.leaving, "in_front": $0.inFront] as [String: Any]
          }]
     }
 
@@ -6657,6 +6659,9 @@ final class CanvasController {
     func foreignActivation(_ app: NSRunningApplication, dockClick: Bool = false) {
         let pid = app.processIdentifier
         guard pid != myPID else { return }   // our own: `returnedToCanvas` handles it
+        if let asked = scaledFocusAsked, asked.pid == pid {
+            Log.note("Scaled use: activation of pid \(pid), asked \(String(format: "%.2f", asked.until - CACurrentMediaTime())) s left, entered \(activeProxy?.windowID ?? 0), dock click \(dockClick)")
+        }
         // Its windows become the user's to move only once one is entered (`enter`), not here: an app
         // sent straight back, or one the canvas goes over to, was never used, and its windows marked
         // the user's had their native frames read back by the next listing, through whatever camera
@@ -7036,6 +7041,16 @@ final class CanvasController {
     /// and the handle is found off the main thread for what later needs it (`fetchHandle`).
     private func absorbKnown(_ p: WindowProxy, ax: AXWindow?, real: CGRect) {
         let p = proxyReturning(p.windowID) ?? p   // one away (hidden, minimized) is back on the canvas first
+        // Banked: the real window sits in its slot on a source display, so `real` says nothing about
+        // where the user should land (taken as the window's place, it sent the camera to the source
+        // display's coordinates, off into empty canvas). As a Dock click on a live window goes over to
+        // it: across the canvas to its tile and in, the bank releasing the window to that spot.
+        if desk?.sourceBank?.contains(p.windowID) == true, p.kind == .window {
+            Log.note("Absorb: \(p.appName) — \(p.title) is in the window bank — over to its tile and in")
+            if let ax { p.ax = ax }
+            clearPending()
+            return handoff(to: p, placement: .centered, spatial: true)
+        }
         stepDownForForeignApp()
         if placeInFront(p, real: real, near: lastInView) { return clearPending() }
         // Brought to the front by name (Spotlight, the Dock) on the live canvas, natively somewhere
@@ -7888,8 +7903,21 @@ final class CanvasController {
     /// through into it (the pointer over its window, and not over the Dock, which sits in front of the
     /// canvas and leaves `passingThrough` on the window drawn behind it) or a focus the canvas just
     /// asked for (`focusInPlace`).
+    /// Input through a tile brings its app forward on purpose (`CapturedWindowInput`): the activation
+    /// that follows is use where the window is drawn, as a click in a scaled real window's content is,
+    /// and the canvas stays (`foreignActivation`). A Dock click on that app still goes to its window.
+    private func capturedFocus(_ pid: pid_t) {
+        Log.note("Captured input: pid \(pid) brought forward for input through its tile")
+        usedScaledPIDs.insert(pid)
+        scaledFocusAsked = (pid, CACurrentMediaTime() + 1.5)
+        wantsFrontUntil = 0
+    }
+
     private func isScaledUseActivation(_ pid: pid_t) -> Bool {
-        if WindowList.pointerOverDock() { return false }   // a Dock click, whatever was asked or hovered just before
+        if WindowList.pointerOverDock() {   // a Dock click, whatever was asked or hovered just before
+            if scaledFocusAsked?.pid == pid { Log.note("Scaled use: pid \(pid) was asked for, but the pointer is over the Dock") }
+            return false
+        }
         if let asked = scaledFocusAsked, asked.pid == pid, CACurrentMediaTime() < asked.until { return true }
         return passingThrough?.pid == pid
     }

@@ -34,6 +34,9 @@ final class CapturedWindowInput {
     var onPointerReleased: (() -> Void)?
     var onCanvasEvent: ((CGEvent) -> Bool)?
     var onFocused: (() -> Void)?
+    /// About to bring this app forward for input through its tile: that activation is use where the
+    /// window is drawn, not the user going over to the app.
+    var onWillFocus: ((pid_t) -> Void)?
 
     var windowID: CGWindowID? { target?.windowID }
 
@@ -187,6 +190,7 @@ final class CapturedWindowInput {
         }
         let generation = revision
         let pid = proxy.pid, id = proxy.windowID
+        onWillFocus?(pid)
         AXQueue.interactive.async { [weak self, weak proxy] in
             let ax = AXWindow.windowsByID(pid: pid)?[id]
             ax?.raise()

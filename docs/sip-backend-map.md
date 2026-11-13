@@ -243,6 +243,37 @@ It was restored to its exact frame through Accessibility within a minute. Since 
 confirms the target tile with a screenshot first, and it avoids Tidy and Arrange, which lay out every
 tile on the canvas and so resize unbanked real windows too.
 
+## Step 3 status (run live 2026-11-13)
+
+- **Foreground watcher in the SIP profile.** `App.finishSIPCanvas` creates `TakeoverMode` and calls
+  `startWatcherOnly()`: `ForegroundWatcher` only (app activations, Dock clicks on the front app, the
+  entered app's window events). No key tap (Sunlight's ⌘Tab switcher and hotkeys belong with step 4),
+  no Spaces watcher, no consent, no preference changes. It stops at quit.
+- **Banked windows are entered from their tile.** `absorbKnown` used to take the window's native
+  frame as where it lives. For a banked window that frame is on a source display, and the camera
+  went there, into empty canvas. A banked window now goes across the canvas to its tile and is
+  entered there (`handoff(... spatial: true)`), the bank releasing it to that spot.
+- **Typing through a tile stays on the canvas.** `CapturedWindowInput.onWillFocus` marks the app
+  (`scaledFocusAsked`, `usedScaledPIDs`) before it is brought forward, so the activation that follows
+  is Sunlight's existing "scaled use" case: the canvas stays.
+- **Windows macOS returns to a source display are adopted.** macOS puts a window back on the display
+  it was last on when that display returns, and the banks keep fixed identities (since `1a7647b`).
+  At launch, windows from an earlier session reappeared on a bank display, untracked: `consider`
+  skipped them as "already on a source display", so they fell back to per-window streams with none
+  of the bank's geometry ownership. They are now parked with `adopt`, journaled, and given a
+  restoration place on a physical display (`SourceBankGeometry.restoration` of their frame). Several
+  adopted windows can share that fallback place; their real original positions are unknown.
+- **Diagnostics.** The status file reports, per canvas window, `attached_to`, `leaving` and
+  `in_front`; for the bank, `entered`, `placing`, `scope` and `skipped` with a reason per window.
+
+| Check | Result |
+|---|---|
+| Activating the fixture app from outside (as ⌘Tab or Spotlight do) | First run: the camera went to the bank coordinates (empty canvas). After the fix: **pass.** "in the window bank — over to its tile and in"; the real window came out exactly at its tile's screen position; one window, no duplicate. |
+| Clicking the fixture's Dock icon from the canvas | **Pass.** Same step-in to the tile. |
+| Clicking into a tile to type | **Pass** with the Dock hidden: "came forward from its window on the canvas — the canvas stays"; the window stayed banked and took input. One earlier try stepped into the window instead: the Dock had just been revealed, and Sunlight's existing rule treats a press while the pointer is over a Dock window as a Dock click. A Dock that is showing can make that true well away from the icons. Unchanged Sunlight behaviour; it applies only within the Dock's hide delay. |
+| Dock click on the front app while typing through its tile | **Not testable with the fixture.** Sunlight matches Dock icons to apps by bundle path, and the fixture is a bare executable. The rest of that path is the one checked above. |
+| Adoption at launch | **Pass.** All three windows were found on the second bank at launch and adopted into slots. |
+
 ## Not verified by this map
 
 - Runtime behaviour of any row. This map comes from source reading only.

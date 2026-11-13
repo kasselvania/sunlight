@@ -126,7 +126,7 @@ final class SourceBankHost: @unchecked Sendable {
             case "park":
                 let id = (command["id"] as? NSNumber)?.uint32Value ?? 0
                 let pid = (command["pid"] as? NSNumber)?.int32Value ?? 0
-                let record = try park(id, pid: pid)
+                let record = try park(id, pid: pid, adopt: command["adopt"] as? Bool ?? false)
                 send(["event": "reply", "request": request, "record": try object(record)])
             case "place":
                 // In order: each slot is chosen against where the ones before it were just put.
@@ -156,25 +156,37 @@ final class SourceBankHost: @unchecked Sendable {
         } catch { send(["event": "reply", "request": request, "error": error.localizedDescription]) }
     }
 
-    private func park(_ id: CGWindowID, pid: pid_t) throws -> BankRecord {
+    /// `adopt`: the window is already on a source display (macOS returned it there), so where it is
+    /// isn't a place to restore it to; its restoration place is the nearest one on a physical display.
+    private func park(_ id: CGWindowID, pid: pid_t, adopt: Bool = false) throws -> BankRecord {
         if let record = journal.records.first(where: { $0.id == id }) { return record }
         guard let listed = WindowList.onScreen(id), listed.pid == pid, listed.layer == 0,
               let process = BankProcess(pid),
               let ax = AXWindow.windowsByID(pid: pid)?[id], ax.windowID == id,
-              !ax.isFullScreen, !ax.isMinimized, let original = ax.frame else {
+              !ax.isFullScreen, !ax.isMinimized, var original = ax.frame else {
             throw failure("This window cannot be parked with a restorable Accessibility identity.")
+        }
+        let actualAX = original   // where it is now: the AX/window-server offset below comes from this
+        var originalCG = listed.bounds
+        if adopt {
+            guard let screen = physical.first else { throw failure("No physical display is available for an adopted window.") }
+            let back = SourceBankGeometry.restoration(original, physical: physical)
+                ?? CGRect(origin: CGPoint(x: screen.minX + 40, y: screen.minY + 40), size: original.size)
+            let shift = CGPoint(x: back.minX - original.minX, y: back.minY - original.minY)
+            original = back
+            originalCG = listed.bounds.offsetBy(dx: shift.x, dy: shift.y)
         }
         guard let (bankID, slot) = freeSlot(size: listed.bounds.size, excluding: id), let bankBounds = banks[bankID] else {
             throw failure("This window does not fit in the source banks; it remains on its original display.")
         }
-        var record = BankRecord(id: id, process: process, originalAX: original, originalCG: listed.bounds,
+        var record = BankRecord(id: id, process: process, originalAX: original, originalCG: originalCG,
                                 document: ax.document?.absoluteString, native: slot, displayID: bankID)
         // The journal is durable before the first placement. The host also keeps
         // the actual AX handle, so a reused window number cannot inherit it.
         journal.records.append(record)
         handles[id] = ax
         try save()
-        let offset = CGPoint(x: original.minX - listed.bounds.minX, y: original.minY - listed.bounds.minY)
+        let offset = CGPoint(x: actualAX.minX - listed.bounds.minX, y: actualAX.minY - listed.bounds.minY)
         let asked = CGPoint(x: slot.minX + offset.x, y: slot.minY + offset.y)
         do {
             guard ax.setPosition(asked), let actual = awaitFrame(id, pid: pid, matching: { bankBounds.contains($0) && abs($0.minX - slot.minX) < 3 && abs($0.minY - slot.minY) < 3 }) else {
