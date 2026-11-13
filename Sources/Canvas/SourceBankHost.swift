@@ -52,10 +52,10 @@ final class SourceBankHost: @unchecked Sendable {
         let fps = SIPRedesign.frameRate(displayID: screens.first?.id ?? CGMainDisplayID())
         // Create the bank set before the canvas discovers physical displays.
         // Shared feeds replace the expensive per-window overflow streams.
-        for _ in 0..<2 {
-            guard let display = autoreleasepool(invoking: { SLSourceDisplay(width: 3072, height: 2048, scale: 2, refreshRate: Double(fps)) }),
+        for slot in 0..<SLSourceDisplayBankSlotCount {
+            guard let display = autoreleasepool(invoking: { SLSourceDisplay(bankSlot: slot, width: 3072, height: 2048, scale: 2, refreshRate: Double(fps)) }),
                   !physicalIDs.contains(display.displayID), !displayIDs.contains(display.displayID) else {
-                send(["event": "failed", "error": "Could not create the temporary window-bank displays."]); exit(1)
+                send(["event": "failed", "error": "The window-bank display slots are unavailable or still in use."]); exit(1)
             }
             displays.append(display); displayIDs.append(display.displayID)
         }
@@ -259,7 +259,11 @@ final class SourceBankHost: @unchecked Sendable {
     }
 
     @MainActor private func waitForRemoval(reason: String) {
-        guard Set(displayIDs).isDisjoint(with: SourceBankGeometry.activeDisplayIDs()) else {
+        // An inactive display may still be online. Do not declare teardown
+        // complete while WindowServer is still retiring either stable slot.
+        var online = [CGDirectDisplayID](repeating: 0, count: 32), count: UInt32 = 0
+        guard CGGetOnlineDisplayList(32, &online, &count) == .success,
+              Set(displayIDs).isDisjoint(with: online.prefix(Int(count))) else {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { self.waitForRemoval(reason: reason) }
             return
         }

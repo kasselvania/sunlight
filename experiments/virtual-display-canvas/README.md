@@ -6,6 +6,11 @@ original Swift canvas; use `scripts/build-sip-redesign.sh` from the repository r
 The two builds share the canonical Canvas Lab identity, so rebuilding this older experiment into
 `~/Applications` deliberately replaces the current redesign.
 
+Display creation shares the current `SLSourceDisplay` implementation and leases bank slot 0.
+It uses the same fixed identity on each run and refuses to start while the redesign owns that slot.
+The earlier random-serial implementation has been removed; see the
+[display lifecycle findings](../../docs/sip-display-lifecycle.md).
+
 Sunlight Canvas Lab is a native macOS renderer prototype for preserving Sunlight's
 canvas experience with SIP fully enabled. It puts three real windows from a
 separate process on one temporary virtual monitor, then renders their contents

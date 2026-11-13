@@ -1,4 +1,5 @@
-#import "VirtualDisplay.h"
+#import <AppKit/AppKit.h>
+#import "SLSourceDisplay.h"
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <QuartzCore/QuartzCore.h>
 #import <CoreVideo/CoreVideo.h>
@@ -189,7 +190,7 @@ static NSTextField *Label(NSString *text, CGFloat size) {
 @property NSWindow *window;
 @property Canvas *canvas;
 @property NSTextField *status;
-@property CGVirtualDisplay *display;
+@property SLSourceDisplay *display;
 @property CGDirectDisplayID displayID;
 @property NSArray<NSNumber *> *beforeIDs;
 @property NSDictionary *beforeBounds;
@@ -349,18 +350,8 @@ static NSTextField *Label(NSString *text, CGFloat size) {
     [self recordStartup:@"permission_check"];
     [self recordLaunch:@"starting"];
     if(!CGPreflightScreenCaptureAccess()) { [self fail:@"Screen Recording is not granted to this app. Use Allow Screen Recording, then reopen if macOS requests it."]; return; }
-    if(!NSClassFromString(@"CGVirtualDisplay")) { [self fail:@"Virtual display API is unavailable."]; return; }
-    CGVirtualDisplayDescriptor *descriptor=[[NSClassFromString(@"CGVirtualDisplayDescriptor") alloc] init];
-    descriptor.queue=dispatch_get_main_queue(); descriptor.name=@"Sunlight synthetic canvas";
-    descriptor.maxPixelsWide=1280; descriptor.maxPixelsHigh=720; descriptor.sizeInMillimeters=CGSizeMake(300,169);
-    descriptor.vendorID=0x4b56; descriptor.productID=0x534c; descriptor.serialNum=arc4random_uniform(UINT32_MAX-1)+1;
-    self.display=[[NSClassFromString(@"CGVirtualDisplay") alloc] initWithDescriptor:descriptor];
-    self.displayID=self.display ? self.display.displayID : 0;
-    CGVirtualDisplaySettings *settings=[[NSClassFromString(@"CGVirtualDisplaySettings") alloc] init];
-    settings.hiDPI=0;
-    CGVirtualDisplayMode *mode=[[NSClassFromString(@"CGVirtualDisplayMode") alloc] initWithWidth:1280 height:720 refreshRate:60];
-    settings.modes=@[mode];
-    if(!self.display || ![self.display applySettings:settings]) { [self fail:@"Could not create the virtual display."]; return; }
+    self.display=[[SLSourceDisplay alloc] initWithBankSlot:0 width:1280 height:720 scale:1 refreshRate:60];
+    if(!self.display) { [self fail:@"The source display slot is unavailable or already in use."]; return; }
     self.displayID=self.display.displayID;
     if([self.beforeIDs containsObject:@(self.displayID)]) { [self fail:@"The new display did not have a distinct identity."]; return; }
     // macOS already arranges a newly created extended display. The canvas and

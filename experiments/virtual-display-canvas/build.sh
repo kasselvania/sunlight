@@ -9,6 +9,8 @@ xcrun clang -fobjc-arc -fmodules -Wall -Wextra -Werror -O2 \
     -mmacosx-version-min=15.0 \
     -framework AppKit -framework QuartzCore -framework ScreenCaptureKit \
     -framework CoreMedia -framework CoreVideo -framework IOSurface -framework ImageIO \
+    -I "$canvas_root/Sources/SourceDisplay/include" \
+    "$canvas_root/Sources/SourceDisplay/SLSourceDisplay.m" \
     "$canvas_root/experiments/virtual-display-canvas/main.m" \
     -o "$canvas_bundle/Contents/MacOS/VirtualDisplayCanvas"
 cat > "$canvas_bundle/Contents/Info.plist" <<'PLIST'

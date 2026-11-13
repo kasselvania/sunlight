@@ -197,6 +197,27 @@ one source display, and both processes dying followed by relaunch. Both owned di
 journal were removed. Those four final exercises produced no new capture-consent requests;
 a stopped running feed now restores the bank instead of attempting capture on a disappearing display.
 
+### Virtual display identity accumulation — build 10
+
+Repeated bank creation previously assigned new random serials. macOS retained a growing set of
+display identities and ColorSync profiles; 140 Sunlight-generated profiles accumulated during
+local experiments. A ColorSync update loop eventually disrupted the entire desktop and survived
+the canvas quitting. The machine recovered after those profiles and the device cache were backed
+up and the ColorSync services restarted. BetterDisplay was running during the incident; its causal
+role has not been established.
+
+Bank creation now reuses two fixed, distinct identities, with a kernel file lock for each slot.
+Duplicate owners are refused, including across processes. The old renderer experiment uses the
+same implementation. Normal teardown waits for the displays to leave the online list. macOS may
+retain two cached bank profiles; future launches reuse them. The app does not purge system caches
+or require administrator access at runtime.
+
+The [native lifecycle regression](experiments/source-display-lifecycle/README.md) verified stable
+UUIDs and a bounded two-profile set across normal exit, owner death and relaunch, with the physical
+monitor's geometry and 100 Hz mode unchanged and ColorSync settled. The full canvas was not launched
+for this verification. See [the lifecycle findings](docs/sip-display-lifecycle.md) for evidence and
+remaining limits. This fix does not close the separate input and frame-pacing work.
+
 ## Getting around
 
 <p align="center">
