@@ -40,6 +40,8 @@ final class CanvasWindow: NSWindow {
 /// Receives canvas pointer events without repeatedly activating Sunlight over
 /// the app being edited through a captured tile.
 final class CapturedCanvasPanel: NSPanel {
+    var beforeEvent: ((NSEvent) -> Void)?
+    override func sendEvent(_ event: NSEvent) { beforeEvent?(event); super.sendEvent(event) }
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
@@ -383,20 +385,50 @@ final class CanvasController {
         }
         view.onCapturedInput = { [weak self] proxy, event, world in
             self?.wantsFrontUntil = 0
-            if event.type == .leftMouseDown { self?.window.resignKey() }
             return self?.capturedInput.pointer(event, to: proxy, world: world) ?? false
         }
-        view.onCapturedInputCleared = { [weak self] in self?.capturedInput.clear() }
+        view.onCapturedInputCleared = { [weak self] in self?.capturedInput.clear(replayCanvas: true) }
         capturedInput.onFailure = { [weak self] message in
             guard let self else { return }
             Log.note("Captured input: \(message)")
             CanvasToast.show(message, in: self.overlay)
         }
-        capturedInput.worldPoint = { [weak self] point in
-            guard let self else { return point }
-            return self.view.camera.global(viewOrigin: self.display.origin).toWorld(point)
-        }
         capturedInput.onPointerReleased = { [weak self] in self?.view.releaseCapturedPress() }
+        capturedInput.onFocused = { [weak self] in self?.window.resignKey() }
+        capturedInput.onCanvasEvent = { [weak self] event in
+            guard let self, self.window.isVisible,
+                  event.getIntegerValueField(CGEventField(rawValue: 51)!) == Int64(self.window.windowNumber) else { return false }
+            // A gesture that began on the canvas remains its own through the
+            // release, even if its final zoom just handed off to a native window.
+            guard self.activeProxy == nil else { return true }
+            if event.type.rawValue == UInt32(NSEvent.EventType.gesture.rawValue) {
+                if let pinch = PressTap.pinch(in: event) {
+                    let point = CGPoint(x: event.location.x - self.display.frame.minX, y: event.location.y - self.display.frame.minY)
+                    self.view.externalPinch(magnification: pinch.magnification, phase: pinch.phase,
+                        timestamp: TimeInterval(event.timestamp) / 1_000_000_000, at: point)
+                }
+                return true // The canvas also owns the raw gesture's begin/end envelopes.
+            }
+            guard let native = NSEvent(cgEvent: event) else { return false }
+            switch event.type {
+            case .scrollWheel: self.view.scrollWheel(with: native)
+            case .leftMouseDragged, .leftMouseUp:
+                let point = CGPoint(x: event.location.x - self.display.frame.minX, y: event.location.y - self.display.frame.minY)
+                return self.view.externalCapturedPointer(event, at: point)
+            default: return false
+            }
+            return true
+        }
+        if SIPRedesign.enabled {
+            capturedInput.install(canvas: CGWindowID(window.windowNumber), presented: { [weak self] in
+                guard let self else { return false }
+                return self.activeProxy == nil && self.window.isVisible && self.window.level == .floating
+            })
+            (window as? CapturedCanvasPanel)?.beforeEvent = { [weak self] event in
+                guard let self, event.type == .leftMouseDown else { return }
+                if !self.view.capturesPointer(event) { self.capturedInput.clear(replayCanvas: true) }
+            }
+        }
         view.onSpring = { [weak self] proxy, point in self?.springInto(proxy, around: point) }
         view.onFileDragEnded = { [weak self] in self?.fileDragEnded() }
         view.onEnter = { [weak self] proxy, point in self?.handoff(to: proxy, placement: .inPlace(around: point)) }
@@ -502,7 +534,7 @@ final class CanvasController {
         view.isCovered = { [weak overlay] in overlay?.covers($0) ?? false }
         view.isUsingScaledWindow = { [weak self] in
             guard let self else { return false }
-            return self.usingScaledWindow || (SIPRedesign.enabled && self.capturedInput.windowID != nil)
+            return self.usingScaledWindow || self.capturedCanvasPresented
         }
         view.onCameraChanged = { [weak self] in self?.cameraChanged() }
         // The ⌘Tab strip may be on another display's canvas than the flight it follows.
@@ -7641,7 +7673,12 @@ final class CanvasController {
 
     /// Up in front of its display: Sunlight is the active app, or a window is entered on another display,
     /// whose canvas stands in for it on this one (listing, live windows) until Sunlight is back.
-    private var isUp: Bool { NSApp.isActive || staysUp || (SIPRedesign.enabled && capturedInput.windowID != nil) }
+    private var isUp: Bool { NSApp.isActive || staysUp || capturedCanvasPresented }
+
+    /// Canvas presentation is independent of which app currently owns typing.
+    private var capturedCanvasPresented: Bool {
+        SIPRedesign.enabled && activeProxy == nil && window.isVisible && window.level == .floating
+    }
 
     /// A window is entered from another display's canvas, or a window is being used where it is drawn
     /// on this one (`usingScaledWindow`).

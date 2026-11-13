@@ -18,29 +18,37 @@ final class CapturedWindowInput {
     private var preparing = false
     private var pending: [CGEvent] = []
     private var revision = 0
-    private var physicalDown: CGEventTimestamp?
-    private var nativeFrame: CGRect?
+    private var keyboardOrigin: pid_t?
     private var pointerDown: CGEvent?
     private let isolation = CapturedInputIsolation()
+    private let inputEvents = CapturedInputEvents()
     private let postedSource = CGEventSource(stateID: .privateState)
     private var mouseSequence: Int64 = 0
     private(set) var eventsPosted = 0
     var onFailure: ((String) -> Void)?
-    var worldPoint: ((CGPoint) -> CGPoint)?
     var onPointerReleased: (() -> Void)?
+    var onCanvasEvent: ((CGEvent) -> Bool)?
+    var onFocused: (() -> Void)?
 
     var windowID: CGWindowID? { target?.windowID }
 
-    func shutdown() { clear(); isolation.shutdown() }
+    func install(canvas: CGWindowID, presented: @escaping () -> Bool) {
+        if !inputEvents.install(canvas: canvas, presented: presented, cancelled: { [weak self] in self?.clear() }) {
+            onFailure?("Could not start captured input routing.")
+        }
+    }
 
-    func clear() {
+    func shutdown() { clear(); inputEvents.shutdown(); isolation.shutdown() }
+
+    func clear(preserveClick: Bool = false, replayCanvas: Bool = false) {
         if let down = pointerDown, let target,
            WindowList.onScreen(target.windowID)?.pid == target.pid, let up = down.copy() {
             up.type = .leftMouseUp
             up.setDoubleValueField(.mouseEventPressure, value: 0)
             up.postToPid(target.pid)
         }
-        pointerDown = nil; nativeFrame = nil; physicalDown = nil
+        if !preserveClick { inputEvents.releaseToCanvas(replay: replayCanvas) }
+        pointerDown = nil; keyboardOrigin = nil
         onPointerReleased?()
         revision += 1
         target = nil
@@ -65,22 +73,42 @@ final class CapturedWindowInput {
         }
         guard let source = event.cgEvent,
               let native = WindowList.onScreen(proxy.windowID), native.pid == proxy.pid else {
-            clear()
+            if event.type != .scrollWheel { clear() }
             return false
         }
-        if target !== proxy { prepare(proxy) }
-        nativeFrame = native.bounds
+        let point = Self.nativePoint(world: world, tile: proxy.worldRect, native: native.bounds)
+        let local = CGPoint(x: world.x - proxy.worldRect.minX, y: world.y - proxy.worldRect.minY)
+        if event.type == .scrollWheel {
+            // Hover scrolling has its own receiver. It never changes the app
+            // or window selected for typing, including across app boundaries.
+            guard let scroll = source.copy() else { return false }
+            scroll.location = point
+            address(scroll, to: proxy, local: local)
+            if let move = CGEvent(mouseEventSource: postedSource, mouseType: .mouseMoved,
+                                  mouseCursorPosition: point, mouseButton: .left) {
+                move.flags = source.flags
+                address(move, to: proxy, local: local)
+                _ = post(move, to: proxy)
+            }
+            return post(scroll, to: proxy)
+        }
         if event.type == .leftMouseDown {
-            physicalDown = source.timestamp
-            let destinationPID = proxy.pid
-            guard let canvasID = CGWindowID(exactly: event.windowNumber),
-                  isolation.protect(pid: proxy.pid, canvas: canvasID, mark: CanvasView.passedOnMark,
-                      rewrite: { [weak self] in self?.rewriteForeignPointer($0, pid: destinationPID) }) else {
-                clear(); onFailure?("Could not isolate the canvas gesture from the destination app."); return false
+            guard let canvasID = CGWindowID(exactly: event.windowNumber) else { return false }
+            let pids = Set([proxy.pid, NSWorkspace.shared.frontmostApplication?.processIdentifier].compactMap { $0 })
+            for pid in pids where pid != getpid() {
+                guard isolation.protect(pid: pid, canvas: canvasID, mark: CanvasView.passedOnMark,
+                    canvasEvent: { [weak self] in self?.onCanvasEvent?($0) ?? false }) else {
+                    clear(); onFailure?("Could not route input to the chosen app window."); return false
+                }
             }
             mouseSequence &+= 1
+            if target !== proxy || NSWorkspace.shared.frontmostApplication?.processIdentifier != proxy.pid {
+                prepare(proxy)
+            } else if !routeEvents(to: proxy) {
+                clear(); onFailure?("Could not route keyboard input to the chosen window."); return false
+            }
         }
-        let point = Self.nativePoint(world: world, tile: proxy.worldRect, native: native.bounds)
+        guard target === proxy else { return false }
         let original: CGEvent
         if source.type == .leftMouseDown || source.type == .leftMouseUp || source.type == .leftMouseDragged {
             // Start a new window event rather than retaining AppKit's packed
@@ -96,9 +124,8 @@ final class CapturedWindowInput {
             copy.location = point
             original = copy
         }
-        let local = CGPoint(x: world.x - proxy.worldRect.minX, y: world.y - proxy.worldRect.minY)
         address(original, to: proxy, local: local)
-        if event.type == .scrollWheel || event.type == .leftMouseDown,
+        if event.type == .leftMouseDown,
            let move = CGEvent(mouseEventSource: postedSource, mouseType: .mouseMoved,
                               mouseCursorPosition: original.location, mouseButton: .left) {
             move.flags = source.flags
@@ -107,17 +134,6 @@ final class CapturedWindowInput {
         }
         send(original)
         return target === proxy
-    }
-
-    private func rewriteForeignPointer(_ event: CGEvent, pid: pid_t) -> CGEvent? {
-        guard !preparing, let physicalDown, event.timestamp >= physicalDown, let target, target.pid == pid,
-              let nativeFrame, let world = worldPoint?(event.location), let copy = event.copy() else { return nil }
-        copy.location = Self.nativePoint(world: world, tile: target.worldRect, native: nativeFrame)
-        address(copy, to: target, local: CGPoint(x: world.x - target.worldRect.minX, y: world.y - target.worldRect.minY))
-        copy.setIntegerValueField(.mouseEventNumber, value: mouseSequence)
-        copy.setIntegerValueField(.eventSourceUserData, value: CanvasView.passedOnMark)
-        if event.type == .leftMouseUp { pointerDown = nil; self.physicalDown = nil; onPointerReleased?() }
-        return copy
     }
 
     private func address(_ event: CGEvent, to proxy: WindowProxy, local: CGPoint) {
@@ -130,17 +146,25 @@ final class CapturedWindowInput {
 
     func key(_ event: NSEvent) -> Bool {
         guard target != nil else { return false }
-        // Escape gives the keyboard back to the canvas in this initial slice.
-        if event.keyCode == 53 { clear(); return false }
         guard let copy = event.cgEvent?.copy() else { return false }
         send(copy)
         return true
     }
 
+    private func routeEvents(to proxy: WindowProxy) -> Bool {
+        inputEvents.select(pid: proxy.pid,
+            receive: { [weak self] event in if let copy = event.copy() { self?.send(copy) } },
+            pointer: { [weak self] event in _ = self?.onCanvasEvent?(event) })
+    }
+
     private func prepare(_ proxy: WindowProxy) {
-        clear()
+        clear(preserveClick: true)
         target = proxy
+        keyboardOrigin = NSWorkspace.shared.frontmostApplication?.processIdentifier
         preparing = true
+        guard routeEvents(to: proxy) else {
+            clear(); onFailure?("Could not transfer keyboard input to the chosen window."); return
+        }
         let generation = revision
         let pid = proxy.pid, id = proxy.windowID
         AXQueue.interactive.async { [weak self, weak proxy] in
@@ -154,6 +178,11 @@ final class CapturedWindowInput {
                     return
                 }
                 proxy.ax = ax
+                if let front = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+                   front != pid, front != self.keyboardOrigin, front != getpid() {
+                    self.clear() // The user chose another app while AX was preparing this one.
+                    return
+                }
                 if let app = NSRunningApplication(processIdentifier: pid) {
                     if !app.activate(from: .current, options: []), !app.activate(options: []) { _ = forceAppFront(pid) }
                 }
@@ -164,7 +193,9 @@ final class CapturedWindowInput {
 
     private func finishFocus(_ proxy: WindowProxy, generation: Int, until deadline: CFTimeInterval) {
         guard revision == generation, target === proxy else { return }
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == proxy.pid else {
+        let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        guard front == proxy.pid else {
+            if let front, front != keyboardOrigin, front != getpid() { clear(); return }
             if CACurrentMediaTime() < deadline {
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { [weak self, weak proxy] in
                     if let self, let proxy { self.finishFocus(proxy, generation: generation, until: deadline) }
@@ -175,6 +206,9 @@ final class CapturedWindowInput {
             }
             return
         }
+        // The nonactivating panel can retain key focus while the app is already
+        // frontmost. Release it only now; keys during preparation were queued.
+        onFocused?()
         preparing = false
         let events = pending
         pending.removeAll()
@@ -182,6 +216,7 @@ final class CapturedWindowInput {
     }
 
     private func send(_ event: CGEvent) {
+
         guard let target else { return }
         if preparing {
             guard pending.count < 256 else {
@@ -192,11 +227,19 @@ final class CapturedWindowInput {
             pending.append(event)
             return
         }
-        guard WindowList.onScreen(target.windowID)?.pid == target.pid else { clear(); return }
-        event.setIntegerValueField(.eventSourceUserData, value: CanvasView.passedOnMark)
-        event.postToPid(target.pid)
+        guard post(event, to: target) else { clear(); return }
         if event.type == .leftMouseDown || (event.type == .leftMouseDragged && pointerDown != nil) { pointerDown = event.copy() }
         if event.type == .leftMouseUp { pointerDown = nil }
+    }
+
+    @discardableResult private func post(_ event: CGEvent, to proxy: WindowProxy) -> Bool {
+        guard WindowList.onScreen(proxy.windowID)?.pid == proxy.pid else { return false }
+        event.setIntegerValueField(.eventSourceUserData, value: CanvasView.passedOnMark)
+        event.setIntegerValueField(.eventTargetUnixProcessID, value: Int64(proxy.pid))
+        // Replayed input follows the posted press, not its earlier hardware time.
+        event.timestamp = 0
+        event.postToPid(proxy.pid)
         eventsPosted += 1
+        return true
     }
 }

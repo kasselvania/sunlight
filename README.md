@@ -218,6 +218,13 @@ monitor's geometry and 100 Hz mode unchanged and ColorSync settled. The full can
 for this verification. See [the lifecycle findings](docs/sip-display-lifecycle.md) for evidence and
 remaining limits. This fix does not close the separate input and frame-pacing work.
 
+### Input and navigation candidate — build 11
+
+The current development build preserves continuous captured input and gesture routing on top of
+the stable display identities. It includes a pausable Safari animation monitor. Automated input
+verification is paused while the project owner uses the running app; full input parity is not
+established. See the [candidate status and code map](docs/sip-input-navigation.md).
+
 ## Getting around
 
 <p align="center">

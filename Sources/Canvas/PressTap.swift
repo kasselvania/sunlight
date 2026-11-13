@@ -87,6 +87,15 @@ final class PressTap: @unchecked Sendable {
         }
     }
 
+    /// Shared decoding for gestures delivered to a source app while the
+    /// nonactivating captured canvas owns the window under the pointer.
+    static func pinch(in event: CGEvent) -> (rawPhase: Int64, phase: NSEvent.Phase, magnification: CGFloat)? {
+        guard event.type.rawValue == gestureType,
+              event.getIntegerValueField(gestureKindField) == gestureZoomKind else { return nil }
+        let raw = event.getIntegerValueField(gesturePhaseField)
+        return (raw, phase(ofGesture: raw), CGFloat(event.getDoubleValueField(gestureZoomField)))
+    }
+
     static let slop: CGFloat = 3
 
     private enum Phase {
@@ -264,10 +273,10 @@ final class PressTap: @unchecked Sendable {
         // The canvas's own posted events (held presses, 1:1 presses) go on untouched.
         if event.getIntegerValueField(.eventSourceUserData) == CanvasView.passedOnMark { return Unmanaged.passUnretained(event) }
         if type.rawValue == PressTap.gestureType {
-            guard event.getIntegerValueField(PressTap.gestureKindField) == PressTap.gestureZoomKind else { return Unmanaged.passUnretained(event) }
-            let rawPhase = event.getIntegerValueField(PressTap.gesturePhaseField)
-            var phase = PressTap.phase(ofGesture: rawPhase)
-            let magnification = CGFloat(event.getDoubleValueField(PressTap.gestureZoomField))
+            guard let pinch = Self.pinch(in: event) else { return Unmanaged.passUnretained(event) }
+            let rawPhase = pinch.rawPhase
+            var phase = pinch.phase
+            let magnification = pinch.magnification
             let now = event.timestamp
             let (taken, appBegins): (Bool, Bool) = state.withLock { s in
                 if s.pinching || s.appPinching, now > s.pinchSeen, now - s.pinchSeen > PressTap.staleGesture {

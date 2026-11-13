@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Sunlight Bank Motion</title>
+<style>
+  body { font: 28px ui-monospace, monospace; background: #12354a; color: white; margin: 32px; }
+  input { font: 24px monospace; width: 80%; padding: 10px; }
+  button { font: 20px system-ui; padding: 8px 14px; margin: 12px 0; }
+  #track { height: 100px; position: relative; margin-top: 24px; }
+  #dot { width: 48px; height: 48px; background: #00ddcc; border-radius: 50%; will-change: transform; }
+  #rate, small { font: 17px system-ui; line-height: 1.5; }
+</style>
+<h1>REAL SAFARI WINDOW</h1>
+<div id="counter">Source frame 000000</div>
+<div id="rate">Measuring source animation…</div>
+<button id="pause" type="button">Pause animation</button><br>
+<input placeholder="Type here through the Sunlight tile" aria-label="Input timing check">
+<div id="track"><div id="dot"></div></div>
+<small>The number and dot are produced by Safari. Source animation timing is separate from
+Sunlight capture delivery and monitor presentation. Pause stops the animation completely.</small>
+<script>
+  const counter = document.querySelector('#counter'), rate = document.querySelector('#rate');
+  const dot = document.querySelector('#dot'), pause = document.querySelector('#pause');
+  let running = true, frame = 0, request = 0, previous = 0, report = 0, intervals = [];
+  function tick(now) {
+    if (!running) return;
+    if (previous) intervals.push(now - previous);
+    previous = now;
+    if (intervals.length > 240) intervals.shift();
+    counter.textContent = 'Source frame ' + String(++frame).padStart(6, '0');
+    dot.style.transform = `translateX(${220 + 220 * Math.sin(now / 1000)}px)`;
+    if (now - report > 1000 && intervals.length) {
+      const sorted = [...intervals].sort((a, b) => a - b);
+      const mean = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      rate.textContent = `Source rAF: ${(1000 / mean).toFixed(1)} fps · p95 interval: ${sorted[Math.floor((sorted.length - 1) * .95)].toFixed(1)} ms`;
+      report = now;
+    }
+    request = requestAnimationFrame(tick);
+  }
+  pause.onclick = () => {
+    running = !running;
+    pause.textContent = running ? 'Pause animation' : 'Resume animation';
+    if (running) { previous = 0; intervals = []; request = requestAnimationFrame(tick); }
+    else { cancelAnimationFrame(request); rate.textContent = 'Animation paused'; }
+  };
+  request = requestAnimationFrame(tick);
+</script>

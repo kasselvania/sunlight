@@ -2298,6 +2298,11 @@ final class CanvasView: NSView {
         return proxy
     }
 
+    func capturesPointer(_ event: NSEvent) -> Bool {
+        event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+            && capturedInputTarget(at: topLeftPoint(event)) != nil
+    }
+
     func passThroughTarget() -> WindowProxy? {
         guard Settings.useScaledWindows, showsRealWindows, !isOneToOne, !isBusy, !panning, coast == nil,
               zoomCoast == nil, floorPress == nil, !showsDesktop, NSEvent.pressedMouseButtons == 0,
@@ -2954,6 +2959,16 @@ final class CanvasView: NSView {
 
     var isExternalDragging: Bool { dragging != nil }
 
+    /// Continue the captured press in global coordinates even when activation
+    /// delivered its physical drag/release to another process.
+    func externalCapturedPointer(_ event: CGEvent, at point: CGPoint) -> Bool {
+        guard event.type == .leftMouseDragged || event.type == .leftMouseUp,
+              let target = capturedPress, let native = NSEvent(cgEvent: event) else { return false }
+        if event.type == .leftMouseUp { capturedPress = nil }
+        _ = onCapturedInput?(target, native, camera.toWorld(point))
+        return true
+    }
+
     override func scrollWheel(with event: NSEvent) {
         if CanvasView.isPassedOn(event) { return }
         if SIPRedesign.enabled {
@@ -3041,21 +3056,25 @@ final class CanvasView: NSView {
     private weak var pinchingPip: WindowProxy?
 
     override func magnify(with event: NSEvent) {
+        handlePinch(magnification: event.magnification, phase: event.phase,
+                    timestamp: event.timestamp, at: topLeftPoint(event))
+    }
+
+    private func handlePinch(magnification: CGFloat, phase: NSEvent.Phase, timestamp: TimeInterval, at pinchPoint: CGPoint) {
         guard cameraIsFree else {
-            if event.phase == .began { Log.note("Pinch: dropped, the canvas isn't key and no window is in use where it's drawn") }
+            if phase == .began { Log.note("Pinch: dropped, the canvas isn't key and no window is in use where it's drawn") }
             return
         }
-        let pinchPoint = topLeftPoint(event)
-        if event.phase == .began {
+        if phase == .began {
             pinchingPip = isCovered?(pinchPoint) != true ? pipProxy(atScreen: pinchPoint) : nil
         }
         if let p = pinchingPip {
-            let over = event.phase == .ended || event.phase == .cancelled
-            scalePip(of: p, by: max(0.01, 1 + event.magnification), around: pinchPoint, settled: over)
+            let over = phase == .ended || phase == .cancelled
+            scalePip(of: p, by: max(0.01, 1 + magnification), around: pinchPoint, settled: over)
             if over { pinchingPip = nil }
             return
         }
-        pinch(event, at: pinchPoint)
+        pinch(magnification: magnification, phase: phase, timestamp: timestamp, at: pinchPoint)
     }
 
     /// A pinch over a window the canvas has stepped aside for, taken by the press tap from the window
@@ -3065,7 +3084,7 @@ final class CanvasView: NSView {
         // Anchored where the pointer is now, read the way the canvas's own gestures read it, rather
         // than where the tap's thread saw it.
         let anchor = window != nil ? pointerTopLeft : screenPoint
-        pinch(magnification: magnification, phase: phase, timestamp: timestamp, at: anchor)
+        handlePinch(magnification: magnification, phase: phase, timestamp: timestamp, at: anchor)
     }
 
     /// Sunlight's menu for a window the canvas has stepped aside for, on a right-click taken by the press
@@ -3087,10 +3106,6 @@ final class CanvasView: NSView {
         menu.popUp(positioning: nil, at: CGPoint(x: onScreen.minX, y: bounds.height - onScreen.maxY - 3), in: self)
         proxy.pressedControl = nil
         updateHover(at: pointerTopLeft)
-    }
-
-    private func pinch(_ event: NSEvent, at screenPoint: CGPoint) {
-        pinch(magnification: event.magnification, phase: event.phase, timestamp: event.timestamp, at: screenPoint)
     }
 
     private func pinch(magnification: CGFloat, phase: NSEvent.Phase, timestamp: TimeInterval, at screenPoint: CGPoint) {
