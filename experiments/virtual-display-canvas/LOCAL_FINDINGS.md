@@ -120,8 +120,8 @@ focus with Accessibility and app activation, and posts addressed input to that
 app. It uses private `CGEventSetWindowLocation` and the AppKit window-number
 field, informed by the primary [TouchBridge implementation](https://github.com/theofanisv/touch-bridge/blob/main/Sources/TouchPlatform/DirectTarget.swift).
 This is an OS-compatibility dependency, not a SIP exception. A nonactivating
-canvas panel remains above the source, and Sunlight's existing input thread
-owns the left-button drag until release. Native global-pointer polling and
+canvas panel remains above the source, and the canvas forwards each press's
+matching drag and release. Native global-pointer polling and
 other input families are not established by this implementation.
 
 Development-route checks used a disposable TextEdit document at about 80% zoom.
@@ -142,5 +142,56 @@ exposed that helper defect. An unchanged nonempty selection was also insufficien
 evidence of a delivered click; subsequent checks deliberately changed the
 caret location and verified insertion there.
 
-The normal-launch result for the older renderer above does not qualify the
-new Swift build. Its signed installed launch must be verified separately.
+## Installed redesign build 6
+
+The Swift redesign at `~/Applications/Sunlight Canvas Lab.app` now passes its
+separate normal-launch check. The first accepted process was PID 48349, parent
+PID 1, with the exact installed bundle path and both Screen Recording and
+Accessibility access. SIP remained fully enabled. The earlier Screen Recording
+grant survived the update. Through normal system UI, the app's disabled
+Accessibility entry was enabled and its Desktop-folder prompt was allowed.
+The user approved the existing signing key in macOS's native Keychain dialog.
+
+Using the real canvas at zoom `0.8034155081305423`:
+
+- Two content clicks placed TextEdit's native caret at offsets 395 and 867.
+  Six individual virtual-key letters inserted at each location; the caret and
+  document length each advanced by six, to offsets 401 and 873 respectively.
+- A horizontal drag selected 16 characters at offset 395. The real vertical
+  scrollbar then advanced from `0.06877729257641921` to `0.07860262008733625`.
+- The camera's position and zoom stayed exactly fixed. Both screenshots of
+  this owned document's captured tile were inspected: the edits and selection
+  appeared in the viewer, not just the source's Accessibility state.
+- Nine window streams reported active with frames, exceeding the old
+  eight-stream policy. The requested cadence was 100 fps. This is not a
+  delivered-frame-rate, latency or sustained-load measurement.
+
+Evidence is under `build/sip-redesign`: `installed-input-evidence.json`,
+`installed-typed.png`, `installed-selected.png` and the individual native-state
+observations. The GUI check uses synthetic pointer and individual key events
+against an owned TextEdit document. It establishes this bounded functional
+path; it is not physical human-input or broad application-compatibility testing.
+
+The first process exited cleanly. A second normal launch, PID 53779 with parent
+PID 1, retained both permissions. It was then quit and its exit confirmed. The
+owned test document was closed. These results are retained in
+`installed-cleanup.json`, `installed-relaunch.json` and
+`installed-final-cleanup.json`. The installed app is left closed.
+
+Strict deep signature verification, the debug build, 19 focused checks, shell
+syntax and Git whitespace checks passed. The installed executable SHA-256 is
+`237e76f18b979204ac3ad0428f6b3f08df2cea44b1cd1955492f5f6287ecf544`.
+
+Earlier installed candidates exposed a stuck TextEdit mouse-tracking loop and
+intermittent selection. Those failures were not accepted. The final bridge
+constructs fresh destination mouse events, preserving modifiers and click count
+without carrying over the canvas's timestamp, event number or pressure metadata.
+It primes the destination with a mouse move, and latches the canvas press only
+after target preparation has cleared the previous gesture. The extra global
+mouse interception was removed. The final normal-launch check above passed
+without that layer.
+
+Virtual-display integration, covered Spaces consolidation, complete menus and
+window families, native drag and drop, IME, global-pointer-dependent apps,
+multi-display behavior and sustained performance still require implementation
+or qualification before the full redesign can be called complete.

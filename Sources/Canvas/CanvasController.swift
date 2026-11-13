@@ -386,18 +386,13 @@ final class CanvasController {
             // A nonactivating panel can hold key focus even while the source
             // app is frontmost. Release it before asking that app to edit.
             self?.window.resignKey()
-            self?.capturedInput.pointer(event, to: proxy, world: world)
+            return self?.capturedInput.pointer(event, to: proxy, world: world) ?? false
         }
         view.onCapturedInputCleared = { [weak self] in self?.capturedInput.clear() }
         capturedInput.onFailure = { [weak self] message in
             guard let self else { return }
             Log.note("Captured input: \(message)")
             CanvasToast.show(message, in: self.overlay)
-        }
-        capturedInput.worldAtScreenPoint = { [weak self] point in
-            guard let self else { return point }
-            return self.view.camera.toWorld(CGPoint(x: point.x - self.display.frame.minX,
-                                                   y: point.y - self.display.frame.minY))
         }
         capturedInput.onPointerReleased = { [weak self] in self?.view.releaseCapturedPress() }
         view.onSpring = { [weak self] proxy, point in self?.springInto(proxy, around: point) }

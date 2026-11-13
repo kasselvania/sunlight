@@ -18,24 +18,14 @@ final class CapturedWindowInput {
     private var preparing = false
     private var pending: [CGEvent] = []
     private var revision = 0
-    private var pointerTap: PressTap?
     private var pointerDown: CGEvent?
     private(set) var eventsPosted = 0
     var onFailure: ((String) -> Void)?
-    var worldAtScreenPoint: ((CGPoint) -> CGPoint)?
     var onPointerReleased: (() -> Void)?
 
     var windowID: CGWindowID? { target?.windowID }
 
-    init() {
-        if SIPRedesign.enabled {
-            let tap = PressTap { _ in }
-            pointerTap = tap
-            tap.start()
-        }
-    }
-
-    func shutdown() { clear(); pointerTap?.stop() }
+    func shutdown() { clear() }
 
     func clear() {
         if let down = pointerDown, let target,
@@ -44,7 +34,6 @@ final class CapturedWindowInput {
             up.postToPid(target.pid)
         }
         pointerDown = nil
-        pointerTap?.endCapturedDrag()
         onPointerReleased?()
         revision += 1
         target = nil
@@ -60,76 +49,44 @@ final class CapturedWindowInput {
                 y: native.minY + world.y - tile.minY)
     }
 
-    func pointer(_ event: NSEvent, to proxy: WindowProxy, world: CGPoint) {
+    @discardableResult
+    func pointer(_ event: NSEvent, to proxy: WindowProxy, world: CGPoint) -> Bool {
         guard Self.setWindowLocation != nil else {
             clear()
             onFailure?("Window-addressed input is unavailable on this macOS version.")
-            return
+            return false
         }
         guard let source = event.cgEvent,
               let native = WindowList.onScreen(proxy.windowID), native.pid == proxy.pid else {
             clear()
-            return
+            return false
         }
         if target !== proxy { prepare(proxy, native: native.bounds) }
-        if event.type == .leftMouseDown, !startPointerRouting() {
-            clear()
-            onFailure?("Accessibility permission is needed to route this drag safely.")
-            return
-        }
         let point = Self.nativePoint(world: world, tile: proxy.worldRect, native: native.bounds)
         let original: CGEvent
         if source.type == .leftMouseDown || source.type == .leftMouseUp || source.type == .leftMouseDragged {
             // Start a new window event rather than retaining AppKit's packed
             // addressing for the canvas that received the physical press.
             guard let mouse = CGEvent(mouseEventSource: nil, mouseType: source.type,
-                                      mouseCursorPosition: point, mouseButton: .left) else { return }
+                                      mouseCursorPosition: point, mouseButton: .left) else { return false }
             mouse.flags = source.flags
-            mouse.timestamp = source.timestamp
             mouse.setIntegerValueField(.mouseEventClickState, value: source.getIntegerValueField(.mouseEventClickState))
-            mouse.setIntegerValueField(.mouseEventNumber, value: source.getIntegerValueField(.mouseEventNumber))
-            mouse.setDoubleValueField(.mouseEventPressure, value: source.getDoubleValueField(.mouseEventPressure))
             original = mouse
         } else {
-            guard let copy = source.copy() else { return }
+            guard let copy = source.copy() else { return false }
             copy.location = point
             original = copy
         }
         let local = CGPoint(x: world.x - proxy.worldRect.minX, y: world.y - proxy.worldRect.minY)
         address(original, to: proxy, local: local)
-        if event.type == .scrollWheel,
+        if event.type == .scrollWheel || event.type == .leftMouseDown,
            let move = CGEvent(mouseEventSource: nil, mouseType: .mouseMoved,
                               mouseCursorPosition: original.location, mouseButton: .left) {
             address(move, to: proxy, local: local)
             send(move)
         }
         send(original)
-    }
-
-    private func startPointerRouting() -> Bool {
-        guard let pointerTap else { return false }
-        let generation = revision
-        return pointerTap.captureDrag { [weak self] type, event in
-            DispatchQueue.main.async {
-                guard let self, self.revision == generation else { return }
-                self.routePointer(type, event: event)
-            }
-        }
-    }
-
-    private func routePointer(_ type: CGEventType, event: CGEvent) {
-        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput { clear(); return }
-        guard event.getIntegerValueField(.eventSourceUserData) != CanvasView.passedOnMark,
-              let target, let worldAtScreenPoint, let converted = NSEvent(cgEvent: event) else {
-            return
-        }
-        // AppKit drag tracking can take the physical stream after a PID-posted
-        // down. Consume it once here and send only the translated window event.
-        // The visible system cursor follows the person's physical pointer.
-        pointer(converted, to: target, world: worldAtScreenPoint(event.location))
-        if type == .leftMouseUp {
-            onPointerReleased?()
-        }
+        return target === proxy
     }
 
     private func address(_ event: CGEvent, to proxy: WindowProxy, local: CGPoint) {

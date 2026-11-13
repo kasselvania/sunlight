@@ -43,7 +43,7 @@ final class CanvasView: NSView {
     /// A press on a window at 1:1: enter it where it is and pass the press on to the real window, so it's
     /// used straight away, as on the desktop. `press` is the mouse-down.
     var onUse: ((_ proxy: WindowProxy, _ around: CGPoint, _ press: NSEvent) -> Void)?
-    var onCapturedInput: ((WindowProxy, NSEvent, CGPoint) -> Void)?
+    var onCapturedInput: ((WindowProxy, NSEvent, CGPoint) -> Bool)?
     var onCapturedInputCleared: (() -> Void)?
     private var capturedPress: WindowProxy?
     private var capturedScroll: WindowProxy?
@@ -2554,9 +2554,10 @@ final class CanvasView: NSView {
         cancelAnimation()
         if let target = capturedInputTarget(at: screenPoint),
            event.modifierFlags.intersection([.command, .option, .control]).isEmpty {
-            capturedPress = target
             dragging = nil
-            onCapturedInput?(target, event, worldPoint)
+            // Preparing a new target releases the previous gesture. Latch this
+            // press only after preparation so its matching up remains ours.
+            capturedPress = onCapturedInput?(target, event, worldPoint) == true ? target : nil
             return
         }
         onCapturedInputCleared?()
@@ -2673,7 +2674,7 @@ final class CanvasView: NSView {
     override func mouseDragged(with event: NSEvent) {
         if CanvasView.isPassedOn(event) { return }
         if let target = capturedPress {
-            onCapturedInput?(target, event, camera.toWorld(topLeftPoint(event)))
+            _ = onCapturedInput?(target, event, camera.toWorld(topLeftPoint(event)))
             return
         }
         if passingOn {
@@ -2731,7 +2732,7 @@ final class CanvasView: NSView {
         if CanvasView.isPassedOn(event) { return }
         if let target = capturedPress {
             capturedPress = nil
-            onCapturedInput?(target, event, camera.toWorld(topLeftPoint(event)))
+            _ = onCapturedInput?(target, event, camera.toWorld(topLeftPoint(event)))
             return
         }
         if passingOn {
@@ -2953,7 +2954,7 @@ final class CanvasView: NSView {
                     ? capturedInputTarget(at: topLeftPoint(event)) : nil
             }
             if let target = capturedScroll {
-                onCapturedInput?(target, event, camera.toWorld(topLeftPoint(event)))
+                _ = onCapturedInput?(target, event, camera.toWorld(topLeftPoint(event)))
                 if event.phase == .cancelled || event.momentumPhase == .ended { capturedScroll = nil }
                 return
             }

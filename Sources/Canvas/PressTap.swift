@@ -100,8 +100,6 @@ final class PressTap: @unchecked Sendable {
     }
 
     private struct State {
-        var installed = false
-        var capturedDrag: (@Sendable (CGEventType, CGEvent) -> Void)?
         var phase = Phase.idle
         var active = false
         /// A single click is the canvas's (it zooms the window in) rather than posted on to the app.
@@ -153,7 +151,6 @@ final class PressTap: @unchecked Sendable {
     }
 
     func stop() {
-        state.withLock { $0.capturedDrag = nil; $0.installed = false }
         setActive(false)
         guard let runLoop else { return }
         self.runLoop = nil
@@ -186,18 +183,6 @@ final class PressTap: @unchecked Sendable {
     func setFocused(_ on: Bool) {
         state.withLock { $0.focused = on }
     }
-
-    /// Captured-window drags reuse the existing input thread, so a slow canvas
-    /// cannot stall the event tap or leak a second untranslated gesture.
-    func captureDrag(_ handler: @escaping @Sendable (CGEventType, CGEvent) -> Void) -> Bool {
-        state.withLock { s in
-            guard s.installed else { return false }
-            s.capturedDrag = handler
-            return true
-        }
-    }
-
-    func endCapturedDrag() { state.withLock { $0.capturedDrag = nil } }
 
     /// Whether a plain scroll over a window not in use is the app's (`Settings.scaledHoverScroll`)
     /// rather than panning the canvas.
@@ -244,7 +229,6 @@ final class PressTap: @unchecked Sendable {
             return
         }
         self.port = port
-        state.withLock { $0.installed = true }
         let source = CFMachPortCreateRunLoopSource(nil, port, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: port, enable: true)
@@ -255,12 +239,6 @@ final class PressTap: @unchecked Sendable {
         guard let port else { return }
         if !CFMachPortIsValid(port) {
             Log.note("PressTap: port invalidated, reinstalling")
-            let interrupted = state.withLock { s in
-                s.installed = false
-                defer { s.capturedDrag = nil }
-                return s.capturedDrag
-            }
-            if let event = CGEvent(source: nil) { interrupted?(.tapDisabledByUserInput, event) }
             self.port = nil
             installTap()
         } else if !CGEvent.tapIsEnabled(tap: port) {
@@ -276,12 +254,6 @@ final class PressTap: @unchecked Sendable {
 
     private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            let interrupted = state.withLock { s in
-                let handler = s.capturedDrag
-                s.capturedDrag = nil
-                return handler
-            }
-            if let copy = event.copy() { interrupted?(type, copy) }
             if let port { CGEvent.tapEnable(tap: port, enable: true) }
             // Whatever ended while the tap was off went unseen: no gesture is held over it.
             state.withLock { s in
@@ -291,18 +263,6 @@ final class PressTap: @unchecked Sendable {
         }
         // The canvas's own posted events (held presses, 1:1 presses) go on untouched.
         if event.getIntegerValueField(.eventSourceUserData) == CanvasView.passedOnMark { return Unmanaged.passUnretained(event) }
-        if type == .leftMouseDragged || type == .leftMouseUp {
-            let captured = state.withLock { s in
-                let handler = s.capturedDrag
-                if type == .leftMouseUp { s.capturedDrag = nil }
-                return handler
-            }
-            if let captured, let copy = event.copy() {
-                CGWarpMouseCursorPosition(event.location)
-                captured(type, copy)
-                return nil
-            }
-        }
         if type.rawValue == PressTap.gestureType {
             guard event.getIntegerValueField(PressTap.gestureKindField) == PressTap.gestureZoomKind else { return Unmanaged.passUnretained(event) }
             let rawPhase = event.getIntegerValueField(PressTap.gesturePhaseField)

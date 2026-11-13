@@ -99,8 +99,8 @@ work until actually demonstrated. Development launches do not consolidate the us
 profile. It forces captured windows, retains the existing camera and controls, removes the demo
 stream-count and frame-rate policies, and adds window-addressed input through scaled tiles.
 The source app receives focus while a nonactivating canvas panel stays above its native window.
-An input tap owns a captured left-button gesture until release. Canvas chrome and modifier gestures
-continue through the existing handlers.
+The canvas retains each captured press through its matching release, and primes the destination's
+pointer state before a click. Canvas chrome and modifier gestures continue through the existing handlers.
 
 The bridge uses Accessibility, PID event posting, private event addressing (`CGEventSetWindowLocation`
 and the window-number field), and no injected code. That private API is an OS-compatibility dependency;
@@ -122,6 +122,12 @@ directories so macOS does not register competing launchable copies. This profile
 backgrounds and logs separate from installed Sunlight. Its diagnostic session file is
 `~/Library/Application Support/Sunlight SIP Redesign/redesign-session.json`; requested fps and posted
 input counts in that file are not delivered-frame or successful-interaction measurements.
+
+The installed build 6 has been verified through normal macOS launch on this Mac with SIP enabled.
+TextEdit accepted clicks at two positions, keyboard input at each clicked caret, selection and scrolling
+through an approximately 80% tile while the camera stayed fixed. The visible tile reflected those edits.
+Quit and normal relaunch preserved access. See the [local findings](experiments/virtual-display-canvas/LOCAL_FINDINGS.md#installed-redesign-build-6)
+for the bounded evidence and the earlier failures. Sustained performance and full product parity remain open.
 
 ## Getting around
 
