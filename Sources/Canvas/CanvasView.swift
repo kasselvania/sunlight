@@ -486,7 +486,9 @@ final class CanvasView: NSView {
         openHereRing.opacity = 0
         openHereRing.actions = ["position": NSNull()]
         layer?.addSublayer(openHereRing)
-        registerForDraggedTypes([.fileURL])
+        // Under SIP, anything another app drags over a banked window's tile springs that window open
+        // (`foreignDragOperation`): images, links and text from a browser come with these.
+        registerForDraggedTypes(SIPRedesign.enabled ? CanvasView.foreignDragTypes : [.fileURL])
 
         guidesLayer.anchorPoint = .zero
         guidesLayer.position = .zero
@@ -2408,7 +2410,15 @@ final class CanvasView: NSView {
     }
 
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if let op = foreignDragOperation(sender) { return op }
         // Files dragged off the floor are on their way into a window, not to the background.
+        guard sender.draggingSource as? CanvasView !== self, draggedPicture(sender) != nil else { return [] }
+        showDropGlow(true)
+        return .copy
+    }
+
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        if let op = foreignDragOperation(sender) { showDropGlow(false); return op }
         guard sender.draggingSource as? CanvasView !== self, draggedPicture(sender) != nil else { return [] }
         showDropGlow(true)
         return .copy
@@ -2416,6 +2426,84 @@ final class CanvasView: NSView {
 
     override func draggingExited(_ sender: NSDraggingInfo?) {
         showDropGlow(false)
+        if let drag = foreignDrag, !drag.sprung {
+            drag.timer?.invalidate()
+            foreignDrag = nil
+            setHovered(nil)
+        }
+    }
+
+    // MARK: Drags from other apps (SIP)
+
+    static let foreignDragTypes: [NSPasteboard.PasteboardType] = [
+        .fileURL, .URL, .string, .tiff, .png, .html, .rtf, .pdf,
+        NSPasteboard.PasteboardType("public.jpeg"), NSPasteboard.PasteboardType("public.url"),
+        NSPasteboard.PasteboardType("com.apple.pasteboard.promised-file-url"),
+        NSPasteboard.PasteboardType("com.apple.NSFilePromiseItemMetaData"),
+        NSPasteboard.PasteboardType("NSPromiseContentsPboardType"),
+        NSPasteboard.PasteboardType(kPasteboardTypeFileURLPromise as String),
+    ]
+
+    /// Whether a window is on the window bank (its tile is a picture of it there).
+    var isBanked: ((WindowProxy) -> Bool)?
+    /// A drag from another app that sprang a window open ended: the button is up.
+    var onForeignDragEnded: (() -> Void)?
+
+    /// A drag from another app over the canvas: its banked window's tile under the pointer, held there
+    /// for `springDelay`, opens to it as dragged files open a window (`onSpring`): the window comes off
+    /// its bank at 1:1 under the pointer and the canvas steps aside, so the drop is the app's own. The
+    /// window's real self is on a bank, which no drag can reach.
+    private var foreignDrag: (sequence: Int, target: WindowProxy?, timer: Timer?, sprung: Bool)?
+
+    private func foreignDragOperation(_ sender: NSDraggingInfo) -> NSDragOperation? {
+        guard SIPRedesign.enabled, sender.draggingSource == nil else { return nil }
+        if foreignDrag?.sequence != sender.draggingSequenceNumber {
+            foreignDrag?.timer?.invalidate()
+            foreignDrag = (sender.draggingSequenceNumber, nil, nil, false)
+        }
+        guard var drag = foreignDrag, !drag.sprung else { return nil }
+        let local = convert(sender.draggingLocation, from: nil)
+        let topLeft = CGPoint(x: local.x, y: bounds.height - local.y)
+        springPoint = topLeft
+        let target = isCovered?(topLeft) == true ? nil
+            : proxy(at: camera.toWorld(topLeft)).flatMap { $0.kind == .window && isBanked?($0) == true ? $0 : nil }
+        if target !== drag.target {
+            drag.timer?.invalidate()
+            drag.timer = nil
+            drag.target = target
+            setHovered(target)
+            if target != nil {
+                let t = Timer(timeInterval: CanvasView.springDelay, repeats: false) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.springForeign() }
+                }
+                RunLoop.main.add(t, forMode: .common)
+                drag.timer = t
+            }
+        }
+        foreignDrag = drag
+        guard target != nil else { return nil }
+        let mask = sender.draggingSourceOperationMask
+        return mask.contains(.copy) ? .copy : mask.contains(.generic) ? .generic : mask.contains(.move) ? .move : .link
+    }
+
+    private func springForeign() {
+        guard var drag = foreignDrag, !drag.sprung, let target = drag.target else { return }
+        drag.sprung = true
+        drag.timer = nil
+        foreignDrag = drag
+        onSpring?(target, springPoint)
+        // The drop is the app's now; the canvas hears no more of the drag. The button coming up ends it.
+        let poll = Timer(timeInterval: 0.05, repeats: true) { [weak self] t in
+            MainActor.assumeIsolated {
+                guard NSEvent.pressedMouseButtons & 1 == 0 else { return }
+                t.invalidate()
+                guard let self else { return }
+                self.foreignDrag = nil
+                self.setHovered(nil)
+                self.onForeignDragEnded?()
+            }
+        }
+        RunLoop.main.add(poll, forMode: .common)
     }
 
     override func draggingEnded(_ sender: NSDraggingInfo) {
@@ -2425,6 +2513,14 @@ final class CanvasView: NSView {
     /// A picture dropped on the canvas becomes the background (⌘Z puts the old one back).
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         showDropGlow(false)
+        // Let go over a banked window before it sprang open: not a picture for the background; the drag
+        // goes back where it came from.
+        if SIPRedesign.enabled, sender.draggingSource == nil, let drag = foreignDrag, drag.target != nil {
+            drag.timer?.invalidate()
+            foreignDrag = nil
+            setHovered(nil)
+            return false
+        }
         guard sender.draggingSource as? CanvasView !== self, let url = draggedPicture(sender) else { return false }
         onDropPicture?(url)
         return true
@@ -2670,7 +2766,9 @@ final class CanvasView: NSView {
                 return
             }
             // At 1:1 the proxy is the real window, pixel for pixel: the press is the window's own.
-            if isOneToOne, p.kind == .window {
+            // Under SIP the proxy is a picture of a window on a bank, at 1:1 or not: a press its input
+            // didn't take (the title strip, an edge) is the canvas's, as at any zoom.
+            if isOneToOne, p.kind == .window, !SIPRedesign.enabled {
                 dragging = nil
                 passingOn = true
                 onUse?(p, screenPoint, event)
@@ -2835,7 +2933,7 @@ final class CanvasView: NSView {
                 // One click uses a widget, as on the desktop, right away: there's no double-click to wait for.
                 let r = d.proxy.worldRect
                 onPress?(d.proxy, CGPoint(x: r.minX + d.grabOffset.x, y: r.minY + d.grabOffset.y))
-            case .window where scaledWindowsInUse && !Settings.scaledClickZooms:
+            case .window where (scaledWindowsInUse || SIPRedesign.enabled) && !Settings.scaledClickZooms:
                 // Using windows at any zoom, a click on the title strip focuses the window where it is,
                 // as a click in its content does; a double-click brings it to the middle (`mouseDown`).
                 onFocus?(d.proxy)

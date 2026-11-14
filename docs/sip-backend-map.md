@@ -493,3 +493,24 @@ launch, restored to its exact original frame at quit.
   it; released with a ⌘ key-up. Watch for it.
 - The consent prompt stacked to six over four launches of new builds; rebuilding feeds within a run
   added none.
+
+## Build 19: banked windows are used, not entered; drags from other apps (2026-11-13)
+
+Owner's trial of build 18: a click into Zen pulled the real window out of the bank into the middle of
+the screen, in front of the canvas, with its tile still drawn where it was and the window not movable
+until a click on the canvas; ⌘Tab did the same, and the minimap stayed hidden throughout (it hides
+while a window is entered). The log showed `Handoff: → Zen` with the camera at exactly 1:1 and no
+input through the tile before it: a click at 1:1 (`isOneToOne` passes the press on and enters) or a
+pinch ending all the way in. `focusInPlace`, Sunlight's "use it where it's drawn", needs the live
+windows renderer, so under SIP it fell back to entering, as every way in did.
+
+Now, for a banked window, every way in (click at 1:1, pinch, double-click, ⏎, ⌘Tab, Dock) flies the
+camera as before and then uses the window where it's drawn (`useBanked`: raise, app forward, input
+through the tile); the window stays on its bank. A title-strip click focuses in place without a zoom,
+as with "use windows at any zoom". At 1:1, a press the tile's input doesn't take is the canvas's.
+
+Drags from other apps: the canvas registers for the usual drag types and, held `springDelay` over a
+banked window's tile, springs that window open (off its bank at 1:1 under the pointer, the canvas
+stepping aside, as for dragged desktop files), so the drop is the app's own. When the button comes up
+the canvas comes back and the window returns to its bank. Let go over a tile before it springs: the
+drop is refused (it used to offer a picture as the canvas background). Not yet run live.

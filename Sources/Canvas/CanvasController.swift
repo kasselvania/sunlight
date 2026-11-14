@@ -440,6 +440,8 @@ final class CanvasController {
         }
         view.onSpring = { [weak self] proxy, point in self?.springInto(proxy, around: point) }
         view.onFileDragEnded = { [weak self] in self?.fileDragEnded() }
+        view.isBanked = { [weak self] p in self?.desk?.sourceBank?.contains(p.windowID) == true }
+        view.onForeignDragEnded = { [weak self] in self?.foreignDragEnded() }
         view.onEnter = { [weak self] proxy, point in self?.handoff(to: proxy, placement: .inPlace(around: point)) }
         view.onClickEnter = { [weak self] proxy, point, offset in
             self?.preClickCamera = self?.view.camera
@@ -2079,6 +2081,19 @@ final class CanvasController {
         window.ignoresMouseEvents = false
         // The activation held back by the drag lands now: give it its half second from here.
         if let p = activeProxy, expectedActivationPID == p.pid { expectActivation(of: p.pid) }
+    }
+
+    /// A drag from another app sprang a banked window open and was dropped (or let go): the window
+    /// goes back to its bank and the canvas comes back, the window used where it's drawn, as it was.
+    private func foreignDragEnded() {
+        let target = activeProxy
+        fileDragEnded()
+        Log.note("Window bank: the drag into \(target.map { "\($0.appName) — \($0.title)" } ?? "a window") ended; back to the canvas")
+        // A moment for the app to take the drop (a promised file is written after the button is up).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            guard let self, let p = target, self.activeProxy === p else { return }
+            self.show()
+        }
     }
 
     // MARK: Minimap
@@ -4821,6 +4836,13 @@ final class CanvasController {
     /// it never leaves the screen on the way (live windows; see `slide(into:)`).
     func handoff(to p: WindowProxy, placement: Placement = .centered, spatial: Bool = false, gliding from: CGPoint? = nil) {
         guard !handingOff, p.kind == .window else { return letGo(p) }
+        // A banked window is used where it's drawn: the camera goes to it as for any entry, and the
+        // window stays on its bank. Taking it out put a second, real copy in front of the canvas, away
+        // from its tile, which the canvas couldn't move or hide (owner's trial, 2026-11-13). Only a
+        // drag's spring into a window takes it out: the drop needs the real window under the pointer.
+        if SIPRedesign.enabled, !springDrag, desk?.sourceBank?.contains(p.windowID) == true {
+            return useBanked(p, placement: placement, spatial: spatial)
+        }
         if let bank = desk?.sourceBank, bank.contains(p.windowID) {
             // Straight from its slot to where the entry below puts it, at the size the canvas gave it.
             // A sheet's parent or a PiP tile has its own way in: those go back to their original place.
@@ -7948,6 +7970,37 @@ final class CanvasController {
         wantsFrontUntil = 0
     }
 
+    /// A banked window chosen (a click on its title strip, a double-click, ⌘Tab, ⏎, the Dock, a pinch all
+    /// the way in): with a placement the camera goes there as an entry's does, without one it stays; the
+    /// window becomes its app's main window and the app comes forward, for input through its tile.
+    private func useBanked(_ p: WindowProxy, placement: Placement?, spatial: Bool = false) {
+        Log.note("Window bank: \(p.appName) — \(p.title) used where it's drawn\(placement == nil ? "" : ", camera to it")")
+        endShowDesktop(flyBack: false)
+        closeSwitcher(clearHighlight: true)
+        view.bringToFront(p)
+        if let placement {
+            let plan = Handoff.plan(placement, rect: p.worldRect, camera: view.camera, visible: visibleTopLeft, scale: scale,
+                                    tiledArea: tiledArea(of: p))
+            if !view.camera.isClose(to: plan.camera) {
+                if plan.inPlace == nil, spatial || view.isFlying { view.fly(to: plan.camera) }
+                else { view.animateCamera(to: plan.camera) }
+            }
+        }
+        if !isOnCanvas || !window.isVisible { show() }
+        capturedFocus(p.pid)
+        focusedScaledID = p.windowID
+        if p.ax == nil { p.ax = AXWindow.find(windowID: p.windowID, pid: p.pid, approximateFrame: p.lastRealFrame) }
+        let pid = p.pid, ax = p.ax
+        AXQueue.interactive.async {
+            ax?.raise()
+            DispatchQueue.main.async {
+                guard let app = NSRunningApplication(processIdentifier: pid),
+                      NSWorkspace.shared.frontmostApplication?.processIdentifier != pid else { return }
+                if !app.activate(from: .current, options: []) { _ = app.activate(options: []) }
+            }
+        }
+    }
+
     private func isScaledUseActivation(_ pid: pid_t) -> Bool {
         if WindowList.pointerOverDock() {   // a Dock click, whatever was asked or hovered just before
             if scaledFocusAsked?.pid == pid { Log.note("Scaled use: pid \(pid) was asked for, but the pointer is over the Dock") }
@@ -7999,6 +8052,7 @@ final class CanvasController {
     /// window and the app comes to the front, as a click in its content does natively. No zoom: the
     /// canvas stays as it is (`usingScaledWindow`), and the window is used where it's drawn.
     private func focusInPlace(_ p: WindowProxy) {
+        if SIPRedesign.enabled, desk?.sourceBank?.contains(p.windowID) == true { return useBanked(p, placement: nil) }
         guard Settings.useScaledWindows, canPassThrough else {
             let r = view.camera.toScreen(p.worldRect)
             return handoff(to: p, placement: .inPlace(around: CGPoint(x: r.midX, y: r.midY)))
