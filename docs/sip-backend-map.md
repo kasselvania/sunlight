@@ -514,3 +514,21 @@ banked window's tile, springs that window open (off its bank at 1:1 under the po
 stepping aside, as for dragged desktop files), so the drop is the app's own. When the button comes up
 the canvas comes back and the window returns to its bank. Let go over a tile before it springs: the
 drop is refused (it used to offer a picture as the canvas background). Not yet run live.
+
+### Build 19 run live (2026-11-13)
+
+- Used, not entered: verified. A click inside a banked window's tile at 1:1 went to the app (its
+  press arrived; `entered` empty); a double-click on a title strip focused the window in place, then
+  flew the camera to it at 1:1 ("used where it's drawn, camera to it"), still banked, its app in
+  front, minimap up at 100%.
+- Drag and drop between banked windows: NOT working. With a two-process fixture (one app drags text
+  and a PNG, the other logs drops; a native drag between them works), a press through the source's
+  tile started a real drag session, but its image stayed where the drag began, on the bank: after
+  `beginDraggingSession` the system moves the drag with the real pointer, and window-addressed
+  events posted to the app don't move it. So the canvas never saw the drag (no spring), and
+  forwarding positions through the tile under the pointer (tried as build 20, removed) changed
+  nothing. Escape cancelled it. Next to try: once the drag pasteboard changes during a press, end the
+  forwarded press and let the canvas carry the drag itself (read the drag pasteboard, start a drag
+  from the canvas at the real pointer with the same items, so the spring into the target works), or
+  move the source window under the pointer for the drag's start.
+- Consent prompts came back with the new builds (five on screen afterwards).
