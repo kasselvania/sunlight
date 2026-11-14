@@ -47,6 +47,75 @@ final class SourceBank {
     var isDragging: ((CGWindowID) -> Bool)?
     /// A dragged window moved natively by this much: its tile follows.
     var onDragged: ((WindowProxy, CGVector) -> Void)?
+    /// The bank changed a tile's size (it follows its window natively): canvas chrome that draws the
+    /// tiles (the minimap) is told once per turn of the run loop, however many changed.
+    var onTilesChanged: (() -> Void)?
+    private var tilesChangedPending = false
+
+    /// What each canvas needs of the banked windows it shows: the level-of-detail factor of each one
+    /// near its viewport (`setDemand`). Before any canvas has said, every window at full detail.
+    private var demandBySource: [ObjectIdentifier: [CGWindowID: CGFloat]] = [:]
+    /// A rebuild is under way (enumerating shareable content): the feeds it replaces are not checked.
+    private var rebuilding = false
+
+    /// A canvas's capture pass: the banked windows near its viewport, each with the factor its tile is
+    /// drawn at. The feeds follow within a tick or two (`checkFeeds`).
+    func setDemand(_ demand: [CGWindowID: CGFloat], from canvas: AnyObject) {
+        demandBySource[ObjectIdentifier(canvas)] = demand
+    }
+
+    /// Each bank's feed as the canvases want it now.
+    private func feedPlans() -> [CGDirectDisplayID: SourceBankGeometry.FeedPlan] {
+        var merged: [CGWindowID: CGFloat]?
+        if !demandBySource.isEmpty {
+            var m: [CGWindowID: CGFloat] = [:]
+            for d in demandBySource.values { m.merge(d) { max($0, $1) } }
+            merged = m
+        }
+        var plans: [CGDirectDisplayID: SourceBankGeometry.FeedPlan] = [:]
+        for (id, bank) in banks {
+            var windows: [(frame: CGRect, factor: CGFloat)] = []
+            var raised: [CGRect] = []
+            for entry in entries.values where entry.record.displayID == id {
+                // A window out of sight keeps the picture it has; one without a picture yet is fed
+                // once, at whatever detail the rest want, so it has one when it comes into view.
+                let factor = merged.map { $0[entry.record.id] ?? (entry.proxy?.hasBankFrame == false ? 0 : nil) } ?? 1
+                guard let factor else { continue }
+                windows.append((entry.record.native, factor))
+                raised += (raisedByParent[entry.record.id] ?? []).map(\.bounds)
+            }
+            if let plan = SourceBankGeometry.feedPlan(windows: windows, raised: raised, display: bank.bounds, fullScale: bank.scale) {
+                plans[id] = plan
+            }
+        }
+        return plans
+    }
+
+    /// Rebuilds the feeds when what the canvases want has moved past what they capture. Once per
+    /// tracker tick; a rebuild already on its way is let finish.
+    private func checkFeeds() {
+        guard phase == "running", captureWork == nil, !rebuilding else { return }
+        let plans = feedPlans()
+        let stale = Set(banks.keys).contains { id in
+            SourceBankGeometry.feedNeedsRebuild(running: captures[id].map { ($0.source, $0.scale) }, plan: plans[id])
+        }
+        if stale { scheduleCapture() }
+    }
+
+    /// A tile takes its window's native frame; a size that changed is reported (`onTilesChanged`).
+    private func retile(_ p: WindowProxy, at native: CGRect) {
+        let before = p.worldRect
+        p.placedNatively(at: native)
+        guard p.worldRect != before, !tilesChangedPending else { return }
+        tilesChangedPending = true
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.tilesChangedPending = false
+                self.onTilesChanged?()
+            }
+        }
+    }
 
     private let scope: Set<CGWindowID>? = {
         guard let at = CommandLine.arguments.firstIndex(of: "--sip-bank-only") else { return nil }
@@ -58,7 +127,8 @@ final class SourceBank {
         let feeds: [[String: Any]] = captures.sorted { $0.key < $1.key }.map { id, feed in
             ["display_id": id, "backend": feed.backend, "frames_received": feed.received, "frames_presented": feed.presented,
              "pixel_width": feed.pixelSize.width, "pixel_height": feed.pixelSize.height,
-             "capture_seconds": feed.elapsed, "capture_rect": NSStringFromRect(feed.source), "running": feed.running]
+             "capture_seconds": feed.elapsed, "capture_rect": NSStringFromRect(feed.source), "running": feed.running,
+             "scale": feed.scale]
         }
         return ["phase": phase, "host_pid": process?.processIdentifier ?? 0,
          "host_bundle_id": hostIdentity, "display_ids": banks.keys.sorted(), "displays": banks.map { ["id": $0.key, "bounds": NSStringFromRect($0.value.bounds), "scale": $0.value.scale] },
@@ -70,6 +140,7 @@ final class SourceBank {
          "pending": pending.sorted(), "refused": refused.map { ["id": $0.key, "reason": $0.value] },
          "entered": native.sorted(), "placing": placing.sorted(), "scope": scope.map { $0.sorted() } ?? [],
          "skipped": skipped.map { ["id": $0.key, "reason": $0.value] },
+         "demand": demandBySource.values.flatMap { $0.map { ["id": $0.key, "factor": $0.value] } },
          "error": error ?? ""]
     }
 
@@ -138,7 +209,7 @@ final class SourceBank {
             guard let entry = entries[p.windowID], entry.proxy !== p, p.pid == entry.record.process.pid else { continue }
             entries[p.windowID] = Entry(proxy: p, record: entry.record)
             p.owner = .canvas
-            p.placedNatively(at: entry.record.native)
+            retile(p, at: entry.record.native)
             p.beginBankCapture()
             cornersMeasured[p.windowID] = nil   // a new tile: measured for it
         }
@@ -169,7 +240,7 @@ final class SourceBank {
                           let record = try? JSONDecoder().decode(BankRecord.self, from: data) {
                     self.entries[p.windowID] = Entry(proxy: p, record: record)
                     p.owner = .canvas
-                    p.placedNatively(at: record.native)
+                    retile(p, at: record.native)
                     p.beginBankCapture()
                     self.measureCorners(p.windowID)
                     self.scheduleCapture()
@@ -198,7 +269,7 @@ final class SourceBank {
         changedAt[p.windowID] = nil
         cornersMeasured[p.windowID] = nil
         p.endBankCapture()
-        if let frame = reply["restored"] as? String, !frame.isEmpty { p.placedNatively(at: NSRectFromString(frame)) }
+        if let frame = reply["restored"] as? String, !frame.isEmpty { retile(p, at: NSRectFromString(frame)) }
         scheduleCapture(); onChange?()
         return true
     }
@@ -224,17 +295,15 @@ final class SourceBank {
         guard phase == "running", !entries.isEmpty else { return }
         let ids = entries.keys.filter { !placing.contains($0) && !releasing.contains($0) && !native.contains($0) }
         let live = WindowList.onScreen(Array(ids))
-        var refeed = false
         // Follow every window first, so the overlap test below sees where they all are now.
         for id in ids {
             // Minimized or hidden: the Dock's animation warps the frame on its way; nothing to follow.
             guard let entry = entries[id], entry.proxy?.away == nil, let info = live[id], info.pid == entry.record.process.pid,
-                  let displayID = entry.record.displayID else { continue }
+                  entry.record.displayID != nil else { continue }
             let recorded = entry.record.native
             guard !info.bounds.isClose(to: recorded) else { continue }
             changedAt[id] = CACurrentMediaTime()
             follow(id, to: info.bounds, from: recorded, dragging: isDragging?(id) == true)
-            if !(captures[displayID]?.source.contains(info.bounds) ?? false) { refeed = true }
         }
         // The banked app in front: its raised windows, and room for them in the feed.
         var raised: [CGWindowID: [WindowInfo]] = [:]
@@ -246,11 +315,10 @@ final class SourceBank {
                 && banks.values.contains(where: { $0.bounds.intersects(w.bounds) }) {
                 guard let parent = SourceBankGeometry.raisedParent(w.bounds, among: candidates) else { continue }
                 raised[parent, default: []].append(w)
-                if let display = entries[parent]?.record.displayID, !(captures[display]?.source.contains(w.bounds) ?? false) { refeed = true }
             }
         }
         raisedByParent = raised
-        if refeed { scheduleCapture() }
+        checkFeeds()
         guard placing.isEmpty else { return }
         var reslot: [CGWindowID] = []
         let now = CACurrentMediaTime()
@@ -291,7 +359,7 @@ final class SourceBank {
             if now - since >= 0.6 {
                 sizeMismatchSince[id] = nil
                 Log.note("Window bank: \(p.appName) — \(p.title) tile \(Int(p.worldRect.width))×\(Int(p.worldRect.height)) takes the window's \(Int(entry.record.native.width))×\(Int(entry.record.native.height))")
-                p.placedNatively(at: entry.record.native)
+                retile(p, at: entry.record.native)
             }
         }
     }
@@ -328,7 +396,7 @@ final class SourceBank {
             onDragged?(p, CGVector(dx: frame.minX - recorded.minX, dy: frame.minY - recorded.minY))
         }
         // A resize of the canvas's own is still settling: the canvas has the size.
-        if !p.sizeHeld { p.placedNatively(at: frame) }
+        if !p.sizeHeld { retile(p, at: frame) }
     }
 
     /// How long a window's frame must hold still before the bank moves it to a new slot.
@@ -392,7 +460,7 @@ final class SourceBank {
             guard let object = item["record"], let data = try? JSONSerialization.data(withJSONObject: object),
                   let record = try? JSONDecoder().decode(BankRecord.self, from: data) else { continue }
             self.entries[id] = Entry(proxy: entry.proxy, record: record)
-            if updatingTiles { entry.proxy?.placedNatively(at: record.native) }
+            if updatingTiles, let tile = entry.proxy { retile(tile, at: record.native) }
             Log.note("Window bank: \(id) re-slotted to \(NSStringFromRect(record.native))")
             moved = true
         }
@@ -459,7 +527,7 @@ final class SourceBank {
             for item in value["restored"] as? [[String: Any]] ?? [] {
                 guard let id = (item["id"] as? NSNumber)?.uint32Value, let entry = entries.removeValue(forKey: id) else { continue }
                 entry.proxy?.endBankCapture()
-                if let frame = item["frame"] as? String, !frame.isEmpty { entry.proxy?.placedNatively(at: NSRectFromString(frame)) }
+                if let frame = item["frame"] as? String, !frame.isEmpty, let tile = entry.proxy { retile(tile, at: NSRectFromString(frame)) }
             }
             onChange?()
         case "restoration_pending": phase = "stopping"; fail(value["error"] as? String ?? "Waiting for original windows to restore.")
@@ -497,7 +565,7 @@ final class SourceBank {
         for entry in entries.values {
             entry.proxy?.endBankCapture()
             if entry.record.process.isLive, let w = WindowList.onScreen(entry.record.id), w.pid == entry.record.process.pid {
-                entry.proxy?.placedNatively(at: w.bounds)
+                if let tile = entry.proxy { retile(tile, at: w.bounds) }
             }
         }
         entries.removeAll()
@@ -522,23 +590,30 @@ final class SourceBank {
         captureRevision += 1
         let revision = captureRevision
         guard phase == "running", !entries.isEmpty else { stopCaptures(); return }
+        rebuilding = true
         Task { [weak self] in
             guard let self else { return }
+            defer { if self.captureRevision == revision { self.rebuilding = false } }
             do {
                 let content = try await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: false)
                 guard self.captureRevision == revision, self.phase == "running" else { return }
+                // Planned now, after the wait: only the windows the canvases show, at the detail they're drawn.
+                let plans = self.feedPlans()
                 var fresh: [CGDirectDisplayID: SourceBankCapture] = [:]
-                for (id, bank) in self.banks {
+                for id in self.banks.keys {
+                    // Unchanged plan, running feed: it keeps running (a restart is a visible stall).
+                    if let running = self.captures[id], running.running,
+                       !SourceBankGeometry.feedNeedsRebuild(running: (running.source, running.scale), plan: plans[id]) {
+                        fresh[id] = running
+                        continue
+                    }
+                    guard let plan = plans[id] else { continue }
                     let records = self.entries.values.map(\.record).filter { $0.displayID == id }
-                    guard !records.isEmpty else { continue }
                     guard let display = content.displays.first(where: { $0.displayID == id }) else { self.captureFailed("A source display is unavailable."); return }
                     let windows = records.compactMap { record in content.windows.first { $0.windowID == record.id && $0.owningApplication?.processID == record.process.pid } }
                     guard windows.count == records.count else { self.scheduleCapture(); return }
-                    // Headroom around the windows, so their moves and resizes stay inside this feed.
-                    let raisedHere = records.flatMap { self.raisedByParent[$0.id] ?? [] }.map(\.bounds)
-                    let source = SourceBankGeometry.feedSource(windows: records.map(\.native) + raisedHere, display: display.frame)
-                    guard !source.isEmpty else { continue }
-                    let feed = SourceBankCapture(display: display, source: source, scale: bank.scale,
+                    let source = plan.source
+                    let feed = SourceBankCapture(display: display, source: source, scale: plan.scale,
                                                  fps: SIPRedesign.frameRate(displayID: CGMainDisplayID()))
                     feed.onFrame = { [weak self, weak feed] buffer, region in
                         guard let self, self.captures[id] === feed else { return }
@@ -560,8 +635,13 @@ final class SourceBank {
                     }
                     fresh[id] = feed
                 }
-                self.stopCaptures(); self.captures = fresh
-                for feed in fresh.values { feed.start() }
+                for (id, feed) in self.captures where fresh[id] !== feed { feed.stop() }
+                let started = fresh.filter { self.captures[$0.key] !== $0.value }
+                self.captures = fresh
+                for feed in started.values { feed.start() }
+                if !started.isEmpty {
+                    Log.note("Window bank: feeds " + fresh.sorted { $0.key < $1.key }.map { "\($0.key) \(Int($0.value.source.width))×\(Int($0.value.source.height)) pt at \($0.value.scale)×" }.joined(separator: ", "))
+                }
                 self.onChange?()
             } catch {
                 guard self.captureRevision == revision, self.phase == "running" else { return }

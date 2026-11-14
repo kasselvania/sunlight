@@ -426,3 +426,23 @@ widget preferences byte-identical to before, two display profiles, ColorSync idl
 - PiP behaviour in the SIP profile, and window-level interaction with the `.floating` canvas.
 - Whether `TakeoverMode`'s light path runs cleanly beside the bank without other changes.
 - The exact corner radius macOS 26 uses per window type.
+
+## Build 13: feeds sized to what the canvas shows; minimap (2026-11-13)
+
+**Feed demand.** Each bank feed used to capture every banked window on its bank plus headroom at full
+2× density, whatever the camera showed: 6956 × 5120 px on the owner's banks, 87–91 frames/s, about
+55% WindowServer. The capture pass now reports, per banked window, whether its tile is near the
+viewport (the same enter/leave margins and hysteresis as Sunlight's own streams) and the canvas's
+level of detail (`factor(forLevel: lod.applied)`). `SourceBankGeometry.feedPlan` sizes each feed to
+the windows in sight (plus their menus and headroom) at `2 × factor` pixels per point (floor 0.125);
+a bank with nothing in sight runs no feed. A tile out of sight keeps its last picture; one with no
+picture yet is fed once without raising the detail. `feedNeedsRebuild` restarts a feed only when a
+wanted window is outside it, the detail level changed, or it is over twice the area wanted; an
+unchanged feed keeps running through membership changes (they used to restart every feed). Checked
+on each 30 Hz tracker tick. Status: `bank.feeds[].scale`, `bank.demand`. Not yet measured live.
+
+**Minimap.** It showed only while Sunlight was the active app, but the SIP canvas floats in front
+whichever app has the keyboard, so it came and went with every click into a tile. It now follows
+the canvas being presented (`capturedCanvasPresented`). The bank's own tile resizes (following a
+window natively, re-slots, reconcile) now redraw it (`SourceBank.onTilesChanged`); before, its marks
+kept old sizes until something else redrew it.

@@ -109,6 +109,42 @@ enum SourceBankGeometry {
         return union.insetBy(dx: -feedHeadroom, dy: -feedHeadroom).intersection(display).integral
     }
 
+    /// What one bank's feed captures and at what density: `needed` is what must be inside it (the
+    /// windows the canvas is showing, and their menus), `source` that plus headroom, `scale` pixels per
+    /// point. The canvas draws a tile at its level of detail (`CanvasController.factor(forLevel:)`, 1 =
+    /// the window's own pixels), so a feed at full Retina density while zoomed out to a quarter
+    /// captured sixteen times the pixels anything showed.
+    struct FeedPlan: Equatable {
+        let needed: CGRect
+        let source: CGRect
+        let scale: CGFloat
+    }
+
+    /// Least density a feed is captured at, whatever the zoom: an eighth of a point per pixel.
+    static let minFeedScale: CGFloat = 0.125
+
+    /// `windows`' factor 0 puts a window in the feed without asking for detail (one with no picture yet).
+    /// Nil when no window on the bank is wanted: no feed.
+    static func feedPlan(windows: [(frame: CGRect, factor: CGFloat)], raised: [CGRect], display: CGRect, fullScale: CGFloat) -> FeedPlan? {
+        guard !windows.isEmpty else { return nil }
+        let needed = (windows.map(\.frame) + raised).reduce(CGRect.null) { $0.union($1) }.intersection(display)
+        let source = feedSource(windows: windows.map(\.frame) + raised, display: display)
+        guard !needed.isNull, !source.isEmpty else { return nil }
+        let factor = min(1, windows.map(\.factor).max() ?? 1)
+        return FeedPlan(needed: needed, source: source, scale: max(minFeedScale, fullScale * factor))
+    }
+
+    /// Whether a running feed (`source` at `scale`) must give way to `plan`: something wanted is
+    /// outside it, the density changed, or it captures over twice the area wanted (the camera moved
+    /// on, windows left the viewport). Small changes ride on the headroom; each rebuild restarts a stream.
+    static func feedNeedsRebuild(running: (source: CGRect, scale: CGFloat)?, plan: FeedPlan?) -> Bool {
+        guard let plan else { return running != nil }
+        guard let running else { return true }
+        if abs(running.scale - plan.scale) > 0.001 { return true }
+        if !running.source.contains(plan.needed) { return true }
+        return running.source.width * running.source.height > 2 * plan.source.width * plan.source.height
+    }
+
     /// A window's corner radius, in pixels, from the alpha channel of a one-shot capture (row-major,
     /// one byte per pixel). A shared display feed has no alpha, so whatever sits behind a window on
     /// its bank shows in its corners; the tile is clipped to this radius instead. Measured from the

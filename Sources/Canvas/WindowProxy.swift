@@ -650,6 +650,8 @@ final class WindowProxy {
     }
 
     func beginBankCapture() { stopCapture(); bankCapture = true }
+    /// Banked, with a picture from a feed: one out of sight keeps it, and needs no feed meanwhile.
+    var hasBankFrame: Bool { bankCapture && currentBuffer != nil }
     /// The last bank frame stays up until another source's first frame replaces it (`show`), so a
     /// window leaving the bank (a handoff's flight) never shows an empty tile.
     func endBankCapture() { bankCapture = false; clearRaised() }

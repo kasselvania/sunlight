@@ -45,6 +45,7 @@ final class Desk {
         sourceBank?.onChange = { [weak self] in self?.canvases.forEach { $0.sourceBankChanged() } }
         sourceBank?.isDragging = { [weak self] id in self?.canvases.contains { $0.capturedDrag(id) } ?? false }
         sourceBank?.onDragged = { [weak self] p, delta in self?.canvases.first { $0.owns(p) }?.followCapturedDrag(p, by: delta) }
+        sourceBank?.onTilesChanged = { [weak self] in self?.canvases.forEach { $0.minimap.redraw() } }
         sourceBank?.onFailure = { [weak self] text in
             guard let self else { return }
             CanvasToast.show(text, in: self.lead.overlay)

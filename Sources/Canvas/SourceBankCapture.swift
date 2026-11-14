@@ -14,6 +14,8 @@ final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     nonisolated private let mailbox = OSAllocatedUnfairLock(initialState: Mailbox())
     nonisolated private static let samples = DispatchQueue(label: "sunlight.bank.frames", qos: .userInteractive)
     let source: CGRect
+    /// Pixels per point it captures at.
+    let scale: CGFloat
     private var stream: SCStream?
     private var displayStream: SLDisplayStream?
     private(set) var backend = "starting"
@@ -31,6 +33,7 @@ final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     init(display: SCDisplay, source: CGRect, scale: CGFloat, fps: Int32) {
         self.source = source
+        self.scale = scale
         super.init()
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let config = SCStreamConfiguration()

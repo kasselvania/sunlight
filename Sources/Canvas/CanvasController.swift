@@ -1434,6 +1434,8 @@ final class CanvasController {
         window.ignoresMouseEvents = false
         NSApp.activate()
         window.makeKeyAndOrderFront(nil)
+        // Presented again (floating and visible): the minimap's rule reads that, not activation.
+        if SIPRedesign.enabled { updateMinimap() }
         desk?.bringForward(besides: self)
         // Keys go to the canvas view.
         if window.firstResponder === window { window.makeFirstResponder(view) }
@@ -2096,7 +2098,11 @@ final class CanvasController {
     /// you go into a window (from the moment the flight in starts), another app comes in front, Show
     /// Desktop clears the screen, or Sunlight is off. Called whenever any of those changes.
     func updateMinimap(animated: Bool = true) {
-        let up = MinimapPanel.belongs(setting: Settings.showMinimap, inCanvas: NSApp.isActive && activeProxy == nil && !handingOff,
+        // Under SIP the canvas floats in front whichever app has the keyboard (a banked app's window is
+        // used where it's drawn), so it's "what you're looking at" while it's presented, not only while
+        // Sunlight is the active app: keyed to activation, the card came and went with every click.
+        let looking = NSApp.isActive || capturedCanvasPresented
+        let up = MinimapPanel.belongs(setting: Settings.showMinimap, inCanvas: looking && activeProxy == nil && !handingOff,
                                       showingDesktop: desktopShown != nil, paused: paused)
         guard up != minimapUp else { return }
         minimapUp = up
@@ -5956,7 +5962,9 @@ final class CanvasController {
 
         // First where everything is: in front, or how far from the viewport.
         for p in view.proxies {
-            if p.kind == .window && frontPIDs.contains(p.pid) {
+            // A banked window is never in front of the canvas (it's used where it's drawn): it needs its
+            // viewport state, for the bank's feed, whoever is the front app.
+            if p.kind == .window && frontPIDs.contains(p.pid) && desk?.sourceBank?.contains(p.windowID) != true {
                 p.inFront = true
                 continue
             }
@@ -6003,10 +6011,17 @@ final class CanvasController {
         if moving, candidates.count > CanvasController.maxStreams { wake(at: lod.lastCameraChange + 0.3) }
 
         var streaming = 0, far = 0, front = 0, capped = 0
+        // What the bank's feeds must capture: the banked windows in sight, at this level of detail
+        // (one feed per bank, so the level is the canvas's, as it is for every stream). Out of sight,
+        // a tile keeps its last picture, as a window far off the viewport keeps its last still.
+        var bankDemand: [CGWindowID: CGFloat] = [:]
+        let bankFactor = CanvasController.factor(forLevel: lod.applied)
+        defer { desk?.sourceBank?.setDemand(bankDemand, from: self) }
         for p in view.proxies {
             if desk?.sourceBank?.contains(p.windowID) == true {
                 p.inFront = false
                 p.capped = false
+                if case .far = p.viewport { far += 1 } else if !asleep { bankDemand[p.windowID] = bankFactor }
                 streaming += 1
                 continue
             }
