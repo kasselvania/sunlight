@@ -616,3 +616,16 @@ where Sunlight itself could drop a held release (tap disabled by timeout, queue 
   several Sunlight quits (reports at 18:18, 18:32, 18:51, 19:46, 19:49) and launchd throttled its
   restarts; screen capture was unavailable system-wide for a few minutes. The launch cover now gives up
   after 1.5 s (Sunlight had waited forever for its first picture, and a test then clicked into Zen).
+
+## Features checked live, build 34 (2026-11-13)
+
+- **Show Desktop (F11):** the camera flew to the desktop files at 1:1 and F11 brought it back to the
+  same camera (2587, −209, zoom 0.509).
+- **Picture in Picture (⌃⌥P over a tile):** a banked window went into the bottom-right corner as a live
+  tile (`PiP: … into bottomRight`), and ⌃⌥P over it brought it back (`PiP: … out`).
+- **Layouts (⌘S, ⌘1):** saved "Layout 1" (9 windows); a tile dragged elsewhere went back to its saved
+  place on ⌘1 ("9 of 9 on the canvas"). The test layout was removed afterwards.
+- **Desktop files:** drawn on the canvas floor (seen at Show Desktop); opening and renaming not tried
+  (they would launch apps).
+- Quit restored every window and the Dock preferences exactly; replayd stayed up across this session's quits.
+Not checkable here: more than one display, strip mode.
