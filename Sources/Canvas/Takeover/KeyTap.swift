@@ -212,6 +212,8 @@ final class KeyTap: @unchecked Sendable {
         }
         // Stopped: nothing is the canvas's (a key that came through before the tap stopped listening).
         guard isEnabled else { return Unmanaged.passUnretained(event) }
+        // Sunlight's own Desktop switches, carrying windows between Desktops (`SpacesCarry`): the Mac's.
+        if event.getIntegerValueField(.eventSourceUserData) == SpacesCarry.mark { return Unmanaged.passUnretained(event) }
 
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let flags = event.flags.intersection([.maskCommand, .maskShift, .maskControl, .maskAlternate])

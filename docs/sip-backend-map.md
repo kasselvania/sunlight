@@ -629,3 +629,26 @@ where Sunlight itself could drop a held release (tap disabled by timeout, queue 
   (they would launch apps).
 - Quit restored every window and the Dock preferences exactly; replayd stayed up across this session's quits.
 Not checkable here: more than one display, strip mode.
+
+## Build 36: windows on other Desktops (2026-11-13, run live)
+
+Owner's choice: windows on other Desktops come to the main one while Sunlight runs and go back at quit;
+the Desktops themselves are left alone (recreating removed Desktops at quit isn't possible without
+the Dock's private calls).
+
+`SpacesCarry`: the Desktop map is read through SkyLight (`SLSCopyManagedDisplaySpaces`,
+`SLSCopySpacesForWindows`; read-only, allowed with SIP on). Moving a window is done as a person
+would: hold it by its title bar and switch Desktop with ⌃←/⌃→. Gotchas found: the arrow key must carry
+the Fn and keypad flags or the Desktop shortcut doesn't match; Sunlight's key tap swallows ⌃←/⌃→
+during takeover, so the carry's own key events are marked and passed; the grab point is chosen
+through Accessibility (the window itself, its title text, or a toolbar/group that isn't pressable),
+never a tab or button; each switch is confirmed on the map before the next step. Launch: behind the
+cover, before the bank looks for windows. Quit: after the bank has put windows back, before the Dock
+restart.
+
+Measured with a test window on Desktop 2: launch brought it to Desktop 1 and banked it; quit took it
+back to Desktop 2 and ended on Desktop 1, the owner's windows and Dock preferences exactly restored.
+Found on the way: a fixed wait let the quit's Dock restart cut the last switch short; the screen
+stayed frozen mid-switch (screenshots kept showing 9:09 PM) until another ⌃← finished it. Each switch
+now waits for the map to agree, and the carry always returns to the starting Desktop, confirmed.
+Tools: `carry.swift`, `spacekey.swift`, `spaces.swift`.

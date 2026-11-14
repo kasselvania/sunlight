@@ -5910,6 +5910,7 @@ final class CanvasController {
     /// The canvas fades out for the way out (`TransitionCover`).
     func fadeOutForQuit(_ duration: CFTimeInterval) {
         guard window.isVisible else { return }
+        window.ignoresMouseEvents = true   // windows go home under it, some carried by their title bars
         NSAnimationContext.runAnimationGroup { ctx in
             ctx.duration = duration
             window.animator().alphaValue = 0

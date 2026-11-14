@@ -285,6 +285,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     NSApp.reply(toApplicationShouldTerminate: false)
                     return
                 }
+                // The windows are back on this Desktop: those that came from others go home too, under the cover.
+                await SpacesCarry.scatter(self.spaceOrigins)
                 self.sipStatusTimer?.invalidate()
                 self.takeover?.revertForTermination(quit: quitEvent)
                 self.canvas?.shutdown()
@@ -315,10 +317,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             if Settings.sunlightOn, let covered = await TransitionCover.coverDesktop(within: 1.5) {
                 self?.launchCover = covered.cover
             }
+            // Windows on other Desktops come to this one, behind the cover, before the bank looks for
+            // windows; quit takes them back (`SpacesCarry`).
+            if Settings.sunlightOn { self?.spaceOrigins = await SpacesCarry.gather() }
             await bank.startBeforeDiscovery()
             self?.finishSIPCanvas(bank)
         }
     }
+
+    /// Windows brought from other Desktops at launch, to take back at quit.
+    private var spaceOrigins: [SpacesCarry.Origin] = []
 
     /// The way out's cover, held until the process ends with the windows back under it.
     private var quitCover: TransitionCover?
