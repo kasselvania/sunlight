@@ -44,8 +44,7 @@ enum SourceBankGeometry {
     // SIP PERFORMANCE: packing affects ROI size and overflow stream count.
     // See docs/sip-redesign-performance.md; native slots stay independent of camera motion.
     static func slot(size: CGSize, display: CGRect, occupied: [CGRect]) -> CGRect? {
-        let usable = CGRect(x: display.minX + 24, y: display.minY + 64,
-                            width: display.width - 48, height: display.height - 88)
+        let usable = usableArea(of: display)
         let xs = ([usable.minX] + occupied.map { $0.maxX + 16 }).sorted()
         let ys = ([usable.minY] + occupied.map { $0.maxY + 16 }).sorted()
         for y in ys {
@@ -55,6 +54,28 @@ enum SourceBankGeometry {
             }
         }
         return nil
+    }
+
+    /// Where windows may sit on a bank: clear of its edges and of the menu-bar band at its top.
+    static func usableArea(of display: CGRect) -> CGRect {
+        CGRect(x: display.minX + 24, y: display.minY + 64, width: display.width - 48, height: display.height - 88)
+    }
+
+    /// A bank display's size in points: never smaller than 3072 × 2560, wide enough for a window as
+    /// wide as the widest physical display, tall enough to let a window grow past the tallest one,
+    /// within the virtual display's 8192-pixel limit at 2× (4096 points). A 3072-point bank couldn't
+    /// hold a full-width window from a 3430-point ultrawide (measured 2026-11-13).
+    static func bankSize(physical: [CGSize]) -> CGSize {
+        let wide = physical.map(\.width).max() ?? 0, tall = physical.map(\.height).max() ?? 0
+        return CGSize(width: min(4096, max(3072, (wide + 48).rounded(.up))),
+                      height: min(4096, max(2560, (tall + 88).rounded(.up))))
+    }
+
+    /// The largest size a window can take in the bank: a resize past it is held to it, never answered
+    /// by taking the window out of the bank (as one 2177 pt tall was on a 2048 pt bank, 2026-11-13).
+    static func largestSlot(banks: [CGRect]) -> CGSize {
+        let areas = banks.map(usableArea(of:))
+        return CGSize(width: areas.map(\.width).max() ?? 0, height: areas.map(\.height).max() ?? 0)
     }
 
     /// What a banked window's live native frame asks of the bank. The bank's

@@ -120,6 +120,23 @@ final class SourceBankGeometryTests: XCTestCase {
         XCTAssertLessThan(f.minY, 0)   // below the tile's bottom edge: drawn past it
     }
 
+    func testBanksAreSizedForTheWidestDisplayAndRoomToGrowTaller() {
+        // The owner's ultrawide: wide enough for a full-width window, 2560 tall.
+        XCTAssertEqual(SourceBankGeometry.bankSize(physical: [CGSize(width: 3430, height: 1447)]), CGSize(width: 3478, height: 2560))
+        // A laptop alone: the 3072 × 2560 floor.
+        XCTAssertEqual(SourceBankGeometry.bankSize(physical: [CGSize(width: 1512, height: 982)]), CGSize(width: 3072, height: 2560))
+        // A 6K display: held to the 4096-point (8192-pixel) limit.
+        XCTAssertEqual(SourceBankGeometry.bankSize(physical: [CGSize(width: 6016, height: 3384)]), CGSize(width: 4096, height: 3472))
+    }
+
+    func testTheLargestSlotIsABanksUsableArea() {
+        let banks = [CGRect(x: -6956, y: 0, width: 3478, height: 2560), CGRect(x: -3478, y: 0, width: 3478, height: 2560)]
+        XCTAssertEqual(SourceBankGeometry.largestSlot(banks: banks), CGSize(width: 3430, height: 2472))
+        // Zen asked for 2177 pt on the old 2048 pt bank; on these banks it fits.
+        XCTAssertNotNil(SourceBankGeometry.slot(size: CGSize(width: 1304, height: 2177), display: banks[0], occupied: []))
+        XCTAssertNotNil(SourceBankGeometry.slot(size: CGSize(width: 3430, height: 900), display: banks[0], occupied: []))
+    }
+
     func testProcessIdentityDoesNotTreatAnAbsentProcessAsItsFormerOwner() {
         XCTAssertTrue(BankProcess(getpid())!.isLive)
         XCTAssertNil(BankProcess(Int32.max))

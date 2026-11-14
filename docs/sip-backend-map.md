@@ -394,6 +394,32 @@ feed's Core Graphics display stream is the remaining legacy-capture API. Options
 remembers it for a while), or move the feed to ScreenCaptureKit's display stream and re-measure
 throughput, which the Core Graphics path was chosen for in build 8.
 
+## Owner's first trial and fixes (2026-11-13)
+
+From the owner's session log and report:
+
+- **A resize took Zen out of the bank.** Dragged to 2177 pt tall on a 2048 pt bank, it found no slot,
+  and "no room" released it to its original place; macOS then held it to the screen's height and the
+  restoration timed out (the toast the owner saw). Out of the bank it was streamed per window at
+  Sunlight's capture policy, so it looked slow. A Finder window as wide as the 3430 pt ultrawide could
+  not be banked at all (banks were 3072 pt).
+- **Fixed.** Banks are sized from the physical displays (`SourceBankGeometry.bankSize`: at least
+  3072 × 2560, as wide as the widest display plus margins, within 4096 pt; 3478 × 2560 here). A resize
+  of the canvas's is held to the largest slot (`largestSlot`, via `makeRoom`), and "no room" never
+  takes a window that is still on its bank out of it; only one dragged off its bank goes back. A tile
+  whose size still differs from its settled window 0.6 s after any resize of the canvas's takes the
+  window's size (a drag whose release was lost had left the tile at the pointer's size).
+- **Dock and menu bar.** Neither needs SIP. Takeover's preferences (Dock auto-hide; Mission Control
+  gestures, App Exposé and hot corners off) are now applied by `TakeoverMode.startSIPProfile()`,
+  snapshotted first and reverted at quit (`revertForTermination`). Running as an accessory app (no
+  Dock icon or app menu) was tried and reverted: the SIP canvas is a non-activating panel, so Sunlight
+  never became active and the canvas ignored scrolls; it stays a regular app.
+
+Live (owner away): over-tall drags held to 2472 pt, still banked, tile matching the window; no
+snap-back during drags. Everything banked (8 windows): feed with animated windows 87–91 frames/s over
+the whole larger bank (6956 × 5120 px). After quit, every window at its original frame, Dock and
+widget preferences byte-identical to before, two display profiles, ColorSync idle.
+
 ## Not verified by this map
 
 - Runtime behaviour of any row. This map comes from source reading only.

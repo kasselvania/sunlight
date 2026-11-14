@@ -86,23 +86,20 @@ final class TakeoverMode {
         }
     }
 
-    /// The SIP-enabled profile: the key tap (Sunlight's ⌘Tab switcher, the Mission Control key, F11, ⌘?)
-    /// and the foreground watcher, so a Dock click, ⌘Tab, Spotlight or an app activating itself goes
-    /// through the canvas's own handling (`foreignActivation`). As light mode, nothing is changed on the
-    /// system (no consent, no Dock/Finder preferences, no login item), and the Spaces watcher stays off:
-    /// its Desktop merge needs the Dock add-on.
+    /// The SIP-enabled profile: takeover's preferences (the Dock auto-hides; Mission Control's gestures,
+    /// App Exposé and the hot corners are off), the key tap (Sunlight's ⌘Tab switcher, the Mission Control
+    /// key, F11, ⌘?) and the foreground watcher, so a Dock click, ⌘Tab, Spotlight or an app activating
+    /// itself goes through the canvas's own handling (`foreignActivation`). None of that needs SIP: the
+    /// preferences are ordinary `defaults` values, snapshotted first and put back at quit (`revert`), or
+    /// by the next launch after a crash, or by `--release`. Not here: the login item, the consent sheet,
+    /// and the Spaces watcher, whose Desktop merge needs the Dock add-on.
     func startSIPProfile() {
         guard !isRunning else { return }
+        let (changed, restarted) = applyPrefs()
         keyTap.start()
         watcher.start()
         isRunning = true
-        Log.note("Takeover: SIP profile — key tap and foreground watcher, nothing changed on the system")
-    }
-
-    func stopSIPProfile() {
-        keyTap.stop()
-        watcher.stop()
-        isRunning = false
+        Log.note("Takeover: SIP profile — preferences\(changed.isEmpty ? " already in place" : " applied (\(changed.sorted().joined(separator: ", ")); restarted \(restarted.isEmpty ? "nothing" : restarted.joined(separator: ", ")))"), key tap and foreground watcher")
     }
 
     /// Never opted in, and the current consent text not yet declined.
@@ -166,6 +163,18 @@ final class TakeoverMode {
 
     func apply() {
         guard !isRunning else { return }
+        let (changed, restarted) = applyPrefs()
+        keyTap.start()
+        watcher.start()
+        isRunning = true
+        spaces.start()
+        DispatchQueue.global(qos: .utility).async { LoginItem.register() }   // launchd round trips
+        Log.note("Takeover: on\(changed.isEmpty ? "" : " (changed \(changed.sorted().joined(separator: ", ")); restarted \(restarted.isEmpty ? "nothing" : restarted.joined(separator: ", ")))")")
+    }
+
+    /// Takeover's preferences, snapshotted first (`SystemPrefs`), and their owners restarted to pick them
+    /// up. Returns the domains changed and the processes restarted.
+    private func applyPrefs() -> (Set<String>, [String]) {
         // Snapshot before anything is touched. Re-snapshotting a pref later would record our own value,
         // so an existing snapshot only gains the prefs added to takeover since it was taken.
         let applied = defaults.bool(forKey: Keys.applied)
@@ -186,12 +195,7 @@ final class TakeoverMode {
         if changed.contains(SystemPrefs.dock) { canvas?.releaseLiveWindowsForDockRestart() }
         let restarted = SystemPrefs.restart(domains: changed)
         if !restarted.isEmpty { ignoreActivationsUntil = Date().addingTimeInterval(2) }
-        keyTap.start()
-        watcher.start()
-        isRunning = true
-        spaces.start()
-        DispatchQueue.global(qos: .utility).async { LoginItem.register() }   // launchd round trips
-        Log.note("Takeover: on\(changed.isEmpty ? "" : " (changed \(changed.sorted().joined(separator: ", ")); restarted \(restarted.isEmpty ? "nothing" : restarted.joined(separator: ", ")))")")
+        return (changed, restarted)
     }
 
     /// Sunlight switched off in the menu bar: the keys go back to the Mac (⌘Tab is the Mac's switcher

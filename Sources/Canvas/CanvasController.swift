@@ -3823,14 +3823,14 @@ final class CanvasController {
         let id = p.windowID, pid = p.pid, approx = p.lastRealFrame, known = p.ax
         let name = "\(p.appName) — \(p.title)"
         p.resized(toReal: CGRect(origin: approx.origin, size: size))
-        withBankRoom(id, for: size) { AXQueue.interactive.async { [weak self] in
+        withBankRoom(id, for: size) { allowed in AXQueue.interactive.async { [weak self] in
             let ax = known ?? AXWindow.find(windowID: id, pid: pid, approximateFrame: approx)
             var real: CGRect?
             var fullScreen = false
             if let ax {
                 fullScreen = ax.isFullScreen
                 if !fullScreen {
-                    ax.setSize(size)
+                    ax.setSize(allowed)
                     real = ax.frame
                 }
             }
@@ -3857,9 +3857,10 @@ final class CanvasController {
     /// A banked window about to be resized first goes where its new size fits on its bank: macOS keeps
     /// a window from growing past the edge of the display it's on, so a slot near the edge clamped it
     /// (Left Half gave 1616 pt instead of 1703, measured 2026-11-13). Anything else goes straight on.
-    private func withBankRoom(_ id: CGWindowID, for size: CGSize, then go: @escaping () -> Void) {
-        guard let bank = desk?.sourceBank, bank.contains(id) else { return go() }
-        Task { await bank.makeRoom(id, for: size); go() }
+    /// `go` gets the size to ask the app for: the one asked, held to what the banks can take.
+    private func withBankRoom(_ id: CGWindowID, for size: CGSize, then go: @escaping (CGSize) -> Void) {
+        guard let bank = desk?.sourceBank, bank.contains(id) else { return go(size) }
+        Task { go(await bank.makeRoom(id, for: size)) }
     }
 
     // MARK: Tiling
@@ -4624,11 +4625,11 @@ final class CanvasController {
         resizeInFlight = true
         let id = p.windowID, pid = p.pid, approx = p.lastRealFrame, known = p.ax
         let size = next.size, anchor = next.anchor, finished = next.finished
-        withBankRoom(id, for: size) { AXQueue.interactive.async { [weak self] in
+        withBankRoom(id, for: size) { allowed in AXQueue.interactive.async { [weak self] in
             let ax = known ?? AXWindow.find(windowID: id, pid: pid, approximateFrame: approx)
             var real: CGRect?
             if let ax, !ax.isFullScreen {
-                ax.setSize(size)
+                ax.setSize(allowed)
                 real = ax.frame
             }
             DispatchQueue.main.async {

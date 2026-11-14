@@ -29,6 +29,8 @@ final class SourceBank {
     /// The raised windows (menus, pop-up lists, popovers) of the banked app in front, by the banked
     /// window each belongs to (`SourceBankGeometry.raisedParent`). Drawn over that window's tile.
     private var raisedByParent: [CGWindowID: [WindowInfo]] = [:]
+    /// When each tile's size first differed from its window's, with no resize of the canvas's registered.
+    private var sizeMismatchSince: [CGWindowID: CFTimeInterval] = [:]
     /// The size each window's corners were last measured at (`measureCorners`).
     private var cornersMeasured: [CGWindowID: CGSize] = [:]
     /// When each banked window last moved or resized natively: of two that overlap, the one that
@@ -274,6 +276,23 @@ final class SourceBank {
         // A settled new size: its corners again (an app may change its window style with its size).
         for id in ids where now - (changedAt[id] ?? 0) >= SourceBank.settle {
             if let size = entries[id]?.record.native.size, cornersMeasured[id] != size { measureCorners(id) }
+            // The tile takes the window's real size once it has settled and no resize of the canvas's
+            // is pending: a drag whose release never reached the canvas left the tile at the size the
+            // pointer asked for (2826 pt over a window the banks held to 2472, 2026-11-13), stretching
+            // the picture. Top-left anchored, as the listing's own size updates are.
+            // Only a mismatch that has lasted with no resize of the canvas's registered: at a drag's start
+            // the tile has moved on before the first resize registers (`sizeHeld`), and snapping then
+            // fought the pointer.
+            guard let entry = entries[id], let p = entry.proxy, entry.proxy?.away == nil else { continue }
+            let differs = abs(p.worldRect.width - entry.record.native.width) > 1 || abs(p.worldRect.height - entry.record.native.height) > 1
+            if !differs || p.sizeHeld { sizeMismatchSince[id] = nil; continue }
+            let since = sizeMismatchSince[id] ?? now
+            sizeMismatchSince[id] = since
+            if now - since >= 0.6 {
+                sizeMismatchSince[id] = nil
+                Log.note("Window bank: \(p.appName) — \(p.title) tile \(Int(p.worldRect.width))×\(Int(p.worldRect.height)) takes the window's \(Int(entry.record.native.width))×\(Int(entry.record.native.height))")
+                p.placedNatively(at: entry.record.native)
+            }
         }
     }
 
@@ -316,19 +335,26 @@ final class SourceBank {
     static let settle: CFTimeInterval = 0.3
 
     /// Before a resize of the canvas's own: the window goes where `size` fits on a bank, if it doesn't
-    /// fit where it is. The resize itself is the caller's; the tracker follows it.
-    func makeRoom(_ id: CGWindowID, for size: CGSize) async {
+    /// fit where it is. Returns the size to ask the app for: `size`, held to the largest the bank can
+    /// take. The resize itself is the caller's; the tracker follows it.
+    func makeRoom(_ id: CGWindowID, for requested: CGSize) async -> CGSize {
+        let largest = SourceBankGeometry.largestSlot(banks: banks.values.map(\.bounds))
+        let size = largest.width > 0 ? CGSize(width: min(requested.width, largest.width), height: min(requested.height, largest.height)) : requested
+        if size != requested {
+            Log.note("Window bank: \(id) asked for \(Int(requested.width))×\(Int(requested.height)); the banks take at most \(Int(largest.width))×\(Int(largest.height))")
+        }
         guard let entry = entries[id], !placing.contains(id), let displayID = entry.record.displayID,
-              let bank = banks[displayID]?.bounds else { return }
+              let bank = banks[displayID]?.bounds else { return size }
         let wanted = CGRect(origin: entry.record.native.origin, size: size)
         let others = entries.values.filter { $0.record.id != id && $0.record.displayID == displayID }.map(\.record.native)
-        if bank.contains(wanted), !others.contains(where: { $0.intersects(wanted) }) { return }
+        if bank.contains(wanted), !others.contains(where: { $0.intersects(wanted) }) { return size }
         placing.insert(id)
         let reply = await ask("place", values: ["ids": [id], "width": Double(size.width), "height": Double(size.height)])
         placing.remove(id)
         // The tile already has the size asked for; only the record moves (`placedNatively` would put
         // the tile back to the window's present size).
         await applyPlacements(reply, updatingTiles: false)
+        return size
     }
 
     /// Moves windows that outgrew their slots, or left their bank, to free slots: all of them in one
@@ -352,7 +378,11 @@ final class SourceBank {
             guard let id = (item["id"] as? NSNumber)?.uint32Value, let entry = self.entries[id] else { continue }
             if let text = item["error"] as? String {
                 Log.note("Window bank: re-slot \(id): \(text)")
-                if text == SourceBankHost.noRoom, let p = entry.proxy {
+                // No free slot: a window still on its bank stays where it is, overlapping a neighbour,
+                // rather than leaving the bank (a resize took Zen out of it, 2026-11-13). Only one
+                // that has left its bank altogether goes back to its original place.
+                let onBank = self.banks.values.contains { $0.bounds.contains(entry.record.native) }
+                if text == SourceBankHost.noRoom, !onBank, let p = entry.proxy {
                     self.refused[id] = text
                     _ = await self.release(p)
                     self.native.remove(id)

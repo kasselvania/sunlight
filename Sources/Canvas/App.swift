@@ -70,6 +70,10 @@ enum CanvasApp {
         app.delegate = delegate
         // No Dock icon and no menu bar of its own: Sunlight lives in its menu bar icon (`MenuBarItem`).
         // Info.plist's LSUIElement says the same for the app bundle; this covers `swift run`.
+        // Not the SIP profile: its canvas is a non-activating panel (input through a tile keeps the tile's
+        // app in front), so as an accessory app Sunlight never became active, at launch or on a click,
+        // and the canvas ignored scrolls, pans and zooms (tried 2026-11-13). A regular app is activated by
+        // its launch and its Dock icon.
         app.setActivationPolicy(SIPRedesign.enabled ? .regular : .accessory)
         app.run()
     }
@@ -257,6 +261,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         if SIPRedesign.enabled {
             guard !sipStopping else { return .terminateLater }
             sipStopping = true
+            // Read now: the quit event (a logout's, or none) is only current during this call.
+            let quitEvent = NSAppleEventManager.shared().currentAppleEvent
             Task { [weak self] in
                 guard let self else { return }
                 let restored = await self.canvas?.sourceBank?.stop() ?? true
@@ -266,7 +272,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
                     return
                 }
                 self.sipStatusTimer?.invalidate()
-                self.takeover?.stopSIPProfile()
+                self.takeover?.revertForTermination(quit: quitEvent)
                 self.canvas?.shutdown()
                 self.canvas?.remember()
                 SIPRedesign.publish(["phase": "stopped", "pid": getpid(), "app_path": Bundle.main.bundlePath,

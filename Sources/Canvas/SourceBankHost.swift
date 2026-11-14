@@ -50,10 +50,11 @@ final class SourceBankHost: @unchecked Sendable {
         physical = screens.map(\.visible)
         physicalIDs = Set(screens.map(\.id))
         let fps = SIPRedesign.frameRate(displayID: screens.first?.id ?? CGMainDisplayID())
+        let size = SourceBankGeometry.bankSize(physical: screens.map(\.frame.size))
         // Create the bank set before the canvas discovers physical displays.
         // Shared feeds replace the expensive per-window overflow streams.
         for slot in 0..<SLSourceDisplayBankSlotCount {
-            guard let display = autoreleasepool(invoking: { SLSourceDisplay(bankSlot: slot, width: 3072, height: 2048, scale: 2, refreshRate: Double(fps)) }),
+            guard let display = autoreleasepool(invoking: { SLSourceDisplay(bankSlot: slot, width: UInt(size.width), height: UInt(size.height), scale: 2, refreshRate: Double(fps)) }),
                   !physicalIDs.contains(display.displayID), !displayIDs.contains(display.displayID) else {
                 send(["event": "failed", "error": "The window-bank display slots are unavailable or still in use."]); exit(1)
             }
