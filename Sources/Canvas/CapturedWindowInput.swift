@@ -72,6 +72,21 @@ final class CapturedWindowInput {
         pending.removeAll()
     }
 
+    /// The app under the press started a drag that the canvas now carries: its drag is cancelled
+    /// (Escape, as a user would) and the press is dropped without a release, which would land as a
+    /// click where the drag began.
+    func abandonPressForDrag() {
+        if let target { Self.postKey(53, to: target.pid) }
+        pointerDown = nil
+        clear()
+    }
+
+    nonisolated static func postKey(_ code: CGKeyCode, to pid: pid_t) {
+        for down in [true, false] {
+            CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down)?.postToPid(pid)
+        }
+    }
+
     /// Uses the same world coordinates as Sunlight's camera. Native window
     /// coordinates are read from WindowServer, rather than assumed to equal
     /// the freely arranged tile's world rectangle.

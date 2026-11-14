@@ -442,6 +442,7 @@ final class CanvasController {
         view.onFileDragEnded = { [weak self] in self?.fileDragEnded() }
         view.isBanked = { [weak self] p in self?.desk?.sourceBank?.contains(p.windowID) == true }
         view.onForeignDragEnded = { [weak self] in self?.foreignDragEnded() }
+        view.onAppDrag = { [weak self] proxy in self?.carryAppDrag(from: proxy) }
         view.onEnter = { [weak self] proxy, point in self?.handoff(to: proxy, placement: .inPlace(around: point)) }
         view.onClickEnter = { [weak self] proxy, point, offset in
             self?.preClickCamera = self?.view.camera
@@ -2075,7 +2076,54 @@ final class CanvasController {
         handoff(to: p, placement: .inPlace(around: point))
     }
 
+    /// A drag the canvas carries for an app on the bank (`carryAppDrag`).
+    private var carriedDrag = false
+
+    /// An app on the bank started a drag under a press through its tile: what it put on the drag
+    /// pasteboard, copied (a file it only promised isn't carried), and its own drag cancelled.
+    private func carryAppDrag(from p: WindowProxy) -> (items: [NSPasteboardItem], image: NSImage)? {
+        guard SIPRedesign.enabled else { return nil }
+        let board = NSPasteboard(name: .drag)
+        var image: NSImage?
+        let items = (board.pasteboardItems ?? []).compactMap { source -> NSPasteboardItem? in
+            let item = NSPasteboardItem()
+            var any = false
+            for type in source.types {
+                guard let data = source.data(forType: type) else { continue }
+                item.setData(data, forType: type)
+                any = true
+                if image == nil, type == .png || type == .tiff || type.rawValue == "public.jpeg" { image = NSImage(data: data) }
+            }
+            return any ? item : nil
+        }
+        guard !items.isEmpty else {
+            Log.note("Captured input: \(p.appName) started a drag with nothing the canvas can carry; left to it")
+            return nil
+        }
+        capturedInput.abandonPressForDrag()
+        carriedDrag = true
+        var picture = image ?? NSWorkspace.shared.icon(for: .data)
+        let longest = max(picture.size.width, picture.size.height)
+        if longest > 160 {
+            let f = 160 / longest
+            let resized = NSImage(size: NSSize(width: picture.size.width * f, height: picture.size.height * f))
+            resized.lockFocus(); picture.draw(in: NSRect(origin: .zero, size: resized.size)); resized.unlockFocus()
+            picture = resized
+        }
+        Log.note("Captured input: \(p.appName)'s drag is carried by the canvas: \(board.types?.map(\.rawValue).joined(separator: ", ") ?? "")")
+        return (items, picture)
+    }
+
     private func fileDragEnded() {
+        if carriedDrag {
+            carriedDrag = false
+            // Into a window that sprang open: back to the canvas once the app has the drop.
+            let target = activeProxy
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self, let p = target, self.activeProxy === p else { return }
+                self.show()
+            }
+        }
         guard springDrag else { return }
         springDrag = false
         window.ignoresMouseEvents = false

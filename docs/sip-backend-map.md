@@ -532,3 +532,33 @@ drop is refused (it used to offer a picture as the canvas background). Not yet r
   from the canvas at the real pointer with the same items, so the spring into the target works), or
   move the source window under the pointer for the drag's start.
 - Consent prompts came back with the new builds (five on screen afterwards).
+
+## Build 23: drags between apps, carried by the canvas (2026-11-13, run live)
+
+How screen-to-screen tools (Universal Control, Synergy, Barrier) move a dragged thing: no drag crosses
+the boundary. They see a drag start (on macOS, the drag pasteboard changes under a held button), read
+its contents, end it, and start a new drag where the pointer is with the same contents. Sunlight now
+does the same between the bank and the canvas.
+
+Why it was needed: a press through a tile reaches the app, which starts a real drag session; macOS
+then sends the pointer's events to that app, `CapturedInputIsolation` returns them to the canvas
+(marked as passed on), and they come back to the app as window-addressed events the session ignores.
+The drag stayed where it began, on the bank.
+
+Now: while a captured press is down, a change of the drag pasteboard's count (seen in
+`CanvasView.externalCapturedPointer`, the path those returned drags take, and in `mouseDragged`)
+calls `CanvasController.carryAppDrag`: it copies every type of every item on the drag pasteboard,
+cancels the app's drag (Escape posted to it) and drops the press without a release; the canvas
+starts its own drag from the real pointer with those items (`beginCarriedDrag`, a thumbnail of
+PNG/TIFF/JPEG data or a generic icon). Over a banked window's tile for `springDelay`, the existing
+spring opens that window at 1:1 under the pointer and the canvas steps aside; the drop is the app's.
+When the drag ends, the canvas comes back and the window returns to its bank.
+
+Measured with `experiments/bank-live-check/DragFixture.swift` (two processes: `source` drags text and
+a PNG, `target` logs drops) and `draghold.swift` (press, drag, hold, release): the target logged the
+drop with the same types and string as a native drag between them; the canvas came back, both windows
+banked, nothing entered. Let go over empty canvas: "nothing took them", no stuck drag.
+
+Limits: a file the app only promises (browsers often promise the image file and also put its URL,
+HTML and sometimes TIFF on the pasteboard) isn't carried, only what's on the pasteboard at the start;
+not yet tried with a real browser image. Drops onto Finder's desktop from a banked app are untested.

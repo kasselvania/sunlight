@@ -46,6 +46,12 @@ final class CanvasView: NSView {
     var onCapturedInput: ((WindowProxy, NSEvent, CGPoint) -> Bool)?
     var onCapturedInputCleared: (() -> Void)?
     private var capturedPress: WindowProxy?
+    /// The drag pasteboard's change count when the captured press went down: a change during the press
+    /// is the app starting a drag of its own (an image, a link, text).
+    private var pressDragCount = 0
+    /// The app under a captured press started a drag: its contents, the app's drag cancelled, for the
+    /// canvas to carry (`beginCarriedDrag`). Nil: not taken over; the press goes on to the app.
+    var onAppDrag: ((WindowProxy) -> (items: [NSPasteboardItem], image: NSImage)?)?
     private var capturedScroll: WindowProxy?
     func releaseCapturedPress() { capturedPress = nil }
     /// The rest of a press `onUse` passed on that still came to the canvas: drags and the release.
@@ -2677,6 +2683,7 @@ final class CanvasView: NSView {
             // Preparing a new target releases the previous gesture. Latch this
             // press only after preparation so its matching up remains ours.
             capturedPress = onCapturedInput?(target, event, worldPoint) == true ? target : nil
+            pressDragCount = NSPasteboard(name: .drag).changeCount
             return
         }
         onCapturedInputCleared?()
@@ -2795,6 +2802,14 @@ final class CanvasView: NSView {
     override func mouseDragged(with event: NSEvent) {
         if CanvasView.isPassedOn(event) { return }
         if let target = capturedPress {
+            // An app's drag on a bank moves with the real pointer, which is over the canvas, not over
+            // the bank: it never reached another window (2026-11-13). The canvas carries it instead, as
+            // screen-to-screen tools carry a drag across: the same contents, from the real pointer.
+            if NSPasteboard(name: .drag).changeCount != pressDragCount, let carried = onAppDrag?(target) {
+                capturedPress = nil
+                beginCarriedDrag(carried.items, image: carried.image, event: event)
+                return
+            }
             _ = onCapturedInput?(target, event, camera.toWorld(topLeftPoint(event)))
             return
         }
@@ -3071,6 +3086,16 @@ final class CanvasView: NSView {
     func externalCapturedPointer(_ event: CGEvent, at point: CGPoint) -> Bool {
         guard event.type == .leftMouseDragged || event.type == .leftMouseUp,
               let target = capturedPress, let native = NSEvent(cgEvent: event) else { return false }
+        // Once the app's drag has begun the pointer's drags come here this way, never to `mouseDragged`.
+        if event.type == .leftMouseDragged, NSPasteboard(name: .drag).changeCount != pressDragCount,
+           let window, let carried = onAppDrag?(target),
+           let drag = NSEvent.mouseEvent(with: .leftMouseDragged, location: window.convertPoint(fromScreen: NSEvent.mouseLocation),
+                                         modifierFlags: native.modifierFlags, timestamp: native.timestamp,
+                                         windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+            capturedPress = nil
+            beginCarriedDrag(carried.items, image: carried.image, event: drag)
+            return true
+        }
         if event.type == .leftMouseUp { capturedPress = nil }
         _ = onCapturedInput?(target, native, camera.toWorld(point))
         return true
@@ -3322,6 +3347,25 @@ extension CanvasView: NSDraggingSource {
         sprung = false
         let session = beginDraggingSession(with: items, event: event, source: self)
         session.animatesToStartingPositionsOnCancelOrFail = true
+    }
+
+    /// A drag an app on the bank started, carried by the canvas from the real pointer (`onAppDrag`): held
+    /// over a banked window's tile it springs that window open, as files off the desktop do, and the
+    /// drop is that app's.
+    private func beginCarriedDrag(_ items: [NSPasteboardItem], image: NSImage, event: NSEvent) {
+        let p = convert(event.locationInWindow, from: nil)
+        let size = image.size
+        let dragging = items.map { item -> NSDraggingItem in
+            let d = NSDraggingItem(pasteboardWriter: item)
+            d.setDraggingFrame(NSRect(x: p.x - size.width / 2, y: p.y - size.height / 2, width: size.width, height: size.height), contents: image)
+            return d
+        }
+        guard !dragging.isEmpty else { return }
+        Log.note("Captured input: carrying an app's drag from the canvas (\(items.first?.types.count ?? 0) types)")
+        springTarget = nil
+        sprung = false
+        let session = beginDraggingSession(with: dragging, event: event, source: self)
+        session.animatesToStartingPositionsOnCancelOrFail = false
     }
 
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
