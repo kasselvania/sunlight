@@ -137,48 +137,71 @@ final class SourceBankGeometryTests: XCTestCase {
         XCTAssertNotNil(SourceBankGeometry.slot(size: CGSize(width: 3430, height: 900), display: banks[0], occupied: []))
     }
 
-    func testAFeedCapturesOnlyTheWindowsInSightAtTheirLevelOfDetail() {
+    private typealias W = SourceBankGeometry.FeedWindow
+
+    func testFeedsReadOnlyTheWindowsInSightAtTheirLevelOfDetail() {
         let bank = CGRect(x: -6956, y: 0, width: 3478, height: 2560)
         let a = CGRect(x: -6900, y: 64, width: 800, height: 600), b = CGRect(x: -4200, y: 1800, width: 600, height: 400)
-        // Both in sight at half detail: both inside, at 1 pixel per point instead of 2.
-        let both = SourceBankGeometry.feedPlan(windows: [(a, 0.5), (b, 0.5)], raised: [], display: bank, fullScale: 2)!
-        XCTAssertTrue(both.source.contains(a) && both.source.contains(b))
+        // Split streams allowed, far apart on the bank: a stream each, reading little more than the two windows, not the
+        // rectangle round both; at half detail, 1 pixel per point.
+        let both = SourceBankGeometry.feedPlan(windows: [W(id: 1, frame: a, factor: 0.5), W(id: 2, frame: b, factor: 0.5)], display: bank, fullScale: 2, maxFeeds: 6)!
+        XCTAssertEqual(both.groups.count, 2)
         XCTAssertEqual(both.scale, 1)
-        // Only A in sight: B's corner of the bank isn't captured.
-        let one = SourceBankGeometry.feedPlan(windows: [(a, 1)], raised: [], display: bank, fullScale: 2)!
-        XCTAssertFalse(one.source.intersects(b))
-        XCTAssertEqual(one.scale, 2)
-        XCTAssertEqual(one.needed, a)
-        // A window with no picture yet (factor 0) is inside without raising the detail; a far zoom
-        // is held to the floor; nothing in sight is no feed.
-        let fresh = SourceBankGeometry.feedPlan(windows: [(a, 0.25), (b, 0)], raised: [], display: bank, fullScale: 2)!
-        XCTAssertTrue(fresh.source.contains(b))
-        XCTAssertEqual(fresh.scale, 0.5)
-        XCTAssertEqual(SourceBankGeometry.feedPlan(windows: [(a, 0.01)], raised: [], display: bank, fullScale: 2)!.scale, SourceBankGeometry.minFeedScale)
-        XCTAssertNil(SourceBankGeometry.feedPlan(windows: [], raised: [], display: bank, fullScale: 2))
-        // A menu hanging off A is part of what's needed.
+        XCTAssertTrue(both.groups.contains { $0.ids == [1] && $0.source.contains(a) && !$0.source.intersects(b) })
+        XCTAssertLessThan(both.area, a.union(b).width * a.union(b).height / 2)
+        // One stream by default: round both.
+        XCTAssertEqual(SourceBankGeometry.feedPlan(windows: [W(id: 1, frame: a, factor: 1), W(id: 2, frame: b, factor: 1)], display: bank, fullScale: 2)!.groups.count, 1)
+        // Side by side, the same height: one stream (their headroom overlapped).
+        let c = CGRect(x: -6084, y: 64, width: 700, height: 600)
+        let near = SourceBankGeometry.feedPlan(windows: [W(id: 1, frame: a, factor: 1), W(id: 3, frame: c, factor: 1)], display: bank, fullScale: 2)!
+        XCTAssertEqual(near.groups.map { $0.ids }, [Set<CGWindowID>([1, 3])])
+        XCTAssertEqual(near.scale, 2)
+        // A window with no picture yet (factor 0) is fed without raising the detail; a far zoom is
+        // held to the floor; nothing in sight is no feed.
+        XCTAssertEqual(SourceBankGeometry.feedPlan(windows: [W(id: 1, frame: a, factor: 0.25), W(id: 2, frame: b, factor: 0)], display: bank, fullScale: 2)!.scale, 0.5)
+        XCTAssertEqual(SourceBankGeometry.feedPlan(windows: [W(id: 1, frame: a, factor: 0.01)], display: bank, fullScale: 2)!.scale, SourceBankGeometry.minFeedScale)
+        XCTAssertNil(SourceBankGeometry.feedPlan(windows: [], display: bank, fullScale: 2))
+        // A menu hanging off A is part of what A needs.
         let menu = CGRect(x: -6880, y: 600, width: 220, height: 300)
-        XCTAssertTrue(SourceBankGeometry.feedPlan(windows: [(a, 1)], raised: [menu], display: bank, fullScale: 2)!.needed.contains(menu))
+        let withMenu = SourceBankGeometry.feedPlan(windows: [W(id: 1, frame: a, raised: [menu], factor: 1)], display: bank, fullScale: 2)!
+        XCTAssertTrue(withMenu.needs[1]!.contains(menu) && withMenu.groups[0].source.contains(menu))
     }
 
-    func testAFeedIsRebuiltOnlyWhenItMissesWhatsWantedChangesDetailOrIsFarTooLarge() {
+    func testStreamsPerBankAreCapped() {
+        let bank = CGRect(x: 0, y: 0, width: 3478, height: 2560)
+        var windows: [W] = []
+        for i in 0..<12 {
+            let x: CGFloat = 24 + CGFloat(i % 4) * 860, y: CGFloat = 64 + CGFloat(i / 4) * 830
+            windows.append(W(id: CGWindowID(i + 1), frame: CGRect(x: x, y: y, width: 300, height: 200), factor: 1))
+        }
+        let plan = SourceBankGeometry.feedPlan(windows: windows, display: bank, fullScale: 2, maxFeeds: 6)!
+        XCTAssertLessThanOrEqual(plan.groups.count, 6)
+        XCTAssertEqual(plan.groups.reduce(Set<CGWindowID>()) { $0.union($1.ids) }, Set(windows.map { $0.id }))
+        for w in windows { XCTAssertTrue(plan.groups.contains { $0.ids.contains(w.id) && $0.source.contains(w.frame) }) }
+    }
+
+    func testFeedsAreRebuiltOnlyWhenTheyMissWhatsWantedChangeDetailOrReadFarTooMuch() {
         let bank = CGRect(x: -6956, y: 0, width: 3478, height: 2560)
         let a = CGRect(x: -6900, y: 64, width: 800, height: 600), b = CGRect(x: -4200, y: 1800, width: 600, height: 400)
-        let plan = SourceBankGeometry.feedPlan(windows: [(a, 1)], raised: [], display: bank, fullScale: 2)!
-        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: nil, plan: plan))
-        XCTAssertFalse(SourceBankGeometry.feedNeedsRebuild(running: nil, plan: nil))
-        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: (plan.source, 2), plan: nil))
-        XCTAssertFalse(SourceBankGeometry.feedNeedsRebuild(running: (plan.source, 2), plan: plan))
-        // A moved a little, inside the headroom: the feed runs on.
-        let nudged = SourceBankGeometry.feedPlan(windows: [(a.offsetBy(dx: 100, dy: 40), 1)], raised: [], display: bank, fullScale: 2)!
-        XCTAssertFalse(SourceBankGeometry.feedNeedsRebuild(running: (plan.source, 2), plan: nudged))
+        func run(_ p: SourceBankGeometry.FeedPlan) -> [SourceBankGeometry.RunningFeed] { p.groups.map { .init(ids: $0.ids, source: $0.source, scale: p.scale) } }
+        let plan = SourceBankGeometry.feedPlan(windows: [W(id: 1, frame: a, factor: 1)], display: bank, fullScale: 2)!
+        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: [], plan: plan))
+        XCTAssertFalse(SourceBankGeometry.feedNeedsRebuild(running: [], plan: nil))
+        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: run(plan), plan: nil))
+        XCTAssertFalse(SourceBankGeometry.feedNeedsRebuild(running: run(plan), plan: plan))
+        // A moved a little, inside the headroom: the stream runs on.
+        let nudged = SourceBankGeometry.feedPlan(windows: [W(id: 1, frame: a.offsetBy(dx: 60, dy: 40), factor: 1)], display: bank, fullScale: 2)!
+        XCTAssertFalse(SourceBankGeometry.feedNeedsRebuild(running: run(plan), plan: nudged))
         // Zoomed out a level: new detail.
-        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: (plan.source, 2), plan: SourceBankGeometry.feedPlan(windows: [(a, 0.707)], raised: [], display: bank, fullScale: 2)))
-        // B came into sight: outside the feed.
-        let withB = SourceBankGeometry.feedPlan(windows: [(a, 1), (b, 1)], raised: [], display: bank, fullScale: 2)!
-        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: (plan.source, 2), plan: withB))
-        // B left again: the whole-bank feed is over twice what A needs.
-        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: (withB.source, 2), plan: plan))
+        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: run(plan), plan: SourceBankGeometry.feedPlan(windows: [W(id: 1, frame: a, factor: 0.707)], display: bank, fullScale: 2)))
+        // B came into sight: nothing feeds it.
+        let withB = SourceBankGeometry.feedPlan(windows: [W(id: 1, frame: a, factor: 1), W(id: 2, frame: b, factor: 1)], display: bank, fullScale: 2)!
+        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: run(plan), plan: withB))
+        // A stream reading B's area but not feeding it doesn't count.
+        let readsB = [SourceBankGeometry.RunningFeed(ids: [1], source: bank, scale: 2)]
+        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: readsB, plan: withB))
+        // B left again: its stream is reading more than half again what A needs.
+        XCTAssertTrue(SourceBankGeometry.feedNeedsRebuild(running: run(withB), plan: plan))
     }
 
     func testProcessIdentityDoesNotTreatAnAbsentProcessAsItsFormerOwner() {

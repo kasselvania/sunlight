@@ -20,7 +20,7 @@ final class SourceBank {
     private var native = Set<CGWindowID>()
     private var releasing = Set<CGWindowID>()
     private var refused: [CGWindowID: String] = [:]
-    private var captures: [CGDirectDisplayID: SourceBankCapture] = [:]
+    private var captures: [CGDirectDisplayID: [SourceBankCapture]] = [:]
     private var captureRevision = 0
     private var captureWork: DispatchWorkItem?
     private var banks: [CGDirectDisplayID: (bounds: CGRect, scale: CGFloat)] = [:]
@@ -74,21 +74,24 @@ final class SourceBank {
         }
         var plans: [CGDirectDisplayID: SourceBankGeometry.FeedPlan] = [:]
         for (id, bank) in banks {
-            var windows: [(frame: CGRect, factor: CGFloat)] = []
-            var raised: [CGRect] = []
+            var windows: [SourceBankGeometry.FeedWindow] = []
             for entry in entries.values where entry.record.displayID == id {
                 // A window out of sight keeps the picture it has; one without a picture yet is fed
                 // once, at whatever detail the rest want, so it has one when it comes into view.
                 let factor = merged.map { $0[entry.record.id] ?? (entry.proxy?.hasBankFrame == false ? 0 : nil) } ?? 1
                 guard let factor else { continue }
-                windows.append((entry.record.native, factor))
-                raised += (raisedByParent[entry.record.id] ?? []).map(\.bounds)
+                windows.append(.init(id: entry.record.id, frame: entry.record.native,
+                                     raised: (raisedByParent[entry.record.id] ?? []).map(\.bounds), factor: factor))
             }
-            if let plan = SourceBankGeometry.feedPlan(windows: windows, raised: raised, display: bank.bounds, fullScale: bank.scale) {
+            if let plan = SourceBankGeometry.feedPlan(windows: windows, display: bank.bounds, fullScale: bank.scale) {
                 plans[id] = plan
             }
         }
         return plans
+    }
+
+    private func running(_ display: CGDirectDisplayID) -> [SourceBankGeometry.RunningFeed] {
+        (captures[display] ?? []).map { .init(ids: $0.ids, source: $0.source, scale: $0.scale) }
     }
 
     /// Rebuilds the feeds when what the canvases want has moved past what they capture. Once per
@@ -97,7 +100,7 @@ final class SourceBank {
         guard phase == "running", captureWork == nil, !rebuilding else { return }
         let plans = feedPlans()
         let stale = Set(banks.keys).contains { id in
-            SourceBankGeometry.feedNeedsRebuild(running: captures[id].map { ($0.source, $0.scale) }, plan: plans[id])
+            SourceBankGeometry.feedNeedsRebuild(running: running(id), plan: plans[id])
         }
         if stale { scheduleCapture() }
     }
@@ -124,16 +127,16 @@ final class SourceBank {
     }()
 
     var status: [String: Any] {
-        let feeds: [[String: Any]] = captures.sorted { $0.key < $1.key }.map { id, feed in
-            ["display_id": id, "backend": feed.backend, "frames_received": feed.received, "frames_presented": feed.presented,
+        let feeds: [[String: Any]] = captures.sorted { $0.key < $1.key }.flatMap { id, feeds in feeds.map { feed in
+            ["display_id": id, "windows": feed.ids.sorted(), "backend": feed.backend, "frames_received": feed.received, "frames_presented": feed.presented,
              "pixel_width": feed.pixelSize.width, "pixel_height": feed.pixelSize.height,
              "capture_seconds": feed.elapsed, "capture_rect": NSStringFromRect(feed.source), "running": feed.running,
-             "scale": feed.scale]
-        }
+             "scale": feed.scale] as [String: Any]
+        } }
         return ["phase": phase, "host_pid": process?.processIdentifier ?? 0,
          "host_bundle_id": hostIdentity, "display_ids": banks.keys.sorted(), "displays": banks.map { ["id": $0.key, "bounds": NSStringFromRect($0.value.bounds), "scale": $0.value.scale] },
          "display_active": !banks.isEmpty && Set(banks.keys).isSubset(of: SourceBankGeometry.activeDisplayIDs()),
-         "capture_streams": captures.values.filter(\.running).count, "feeds": feeds,
+         "capture_streams": captures.values.joined().filter(\.running).count, "feeds": feeds,
          "windows": entries.values.map { ["id": $0.record.id, "pid": $0.record.process.pid,
                     "display_id": $0.record.displayID ?? 0,
                     "original": NSStringFromRect($0.record.originalCG), "native": NSStringFromRect($0.record.native)] },
@@ -599,48 +602,66 @@ final class SourceBank {
                 guard self.captureRevision == revision, self.phase == "running" else { return }
                 // Planned now, after the wait: only the windows the canvases show, at the detail they're drawn.
                 let plans = self.feedPlans()
-                var fresh: [CGDirectDisplayID: SourceBankCapture] = [:]
+                var fresh: [CGDirectDisplayID: [SourceBankCapture]] = [:]
+                var started: [SourceBankCapture] = []
+                let fps = SIPRedesign.frameRate(displayID: CGMainDisplayID())
                 for id in self.banks.keys {
-                    // Unchanged plan, running feed: it keeps running (a restart is a visible stall).
-                    if let running = self.captures[id], running.running,
-                       !SourceBankGeometry.feedNeedsRebuild(running: (running.source, running.scale), plan: plans[id]) {
+                    // Unchanged plan, running streams: they keep running (a restart is a visible stall).
+                    if let running = self.captures[id], running.allSatisfy(\.running),
+                       !SourceBankGeometry.feedNeedsRebuild(running: self.running(id), plan: plans[id]) {
                         fresh[id] = running
                         continue
                     }
                     guard let plan = plans[id] else { continue }
-                    let records = self.entries.values.map(\.record).filter { $0.displayID == id }
                     guard let display = content.displays.first(where: { $0.displayID == id }) else { self.captureFailed("A source display is unavailable."); return }
+                    let records = self.entries.values.map(\.record).filter { plan.needs[$0.id] != nil }
                     let windows = records.compactMap { record in content.windows.first { $0.windowID == record.id && $0.owningApplication?.processID == record.process.pid } }
                     guard windows.count == records.count else { self.scheduleCapture(); return }
-                    let source = plan.source
-                    let feed = SourceBankCapture(display: display, source: source, scale: plan.scale,
-                                                 fps: SIPRedesign.frameRate(displayID: CGMainDisplayID()))
-                    feed.onFrame = { [weak self, weak feed] buffer, region in
-                        guard let self, self.captures[id] === feed else { return }
-                        for entry in self.entries.values where entry.record.displayID == id && region.contains(entry.record.native) {
-                            let native = entry.record.native
-                            let tile = entry.proxy?.worldRect.size ?? native.size
-                            let sx = tile.width / max(1, native.width), sy = tile.height / max(1, native.height)
-                            let raised = (self.raisedByParent[entry.record.id] ?? []).filter { region.contains($0.bounds) }.map { w in
-                                let o = SourceBankGeometry.overlayFrame(raised: w.bounds, parent: native, tileHeight: native.height)
-                                return (id: w.id, crop: SourceBankGeometry.crop(window: w.bounds, source: region),
-                                        frame: CGRect(x: o.minX * sx, y: o.minY * sy, width: o.width * sx, height: o.height * sy))
-                            }
-                            entry.proxy?.applyBankFrame(buffer, crop: SourceBankGeometry.crop(window: native, source: region), raised: raised)
+                    var feeds: [SourceBankCapture] = []
+                    var spare = (self.captures[id] ?? []).filter(\.running)
+                    for group in plan.groups {
+                        // A stream reading exactly this rectangle at this density carries on, now
+                        // feeding this group's windows.
+                        if let at = spare.firstIndex(where: { $0.source == group.source && abs($0.scale - plan.scale) < 0.001 }) {
+                            let kept = spare.remove(at: at)
+                            kept.ids = group.ids
+                            feeds.append(kept)
+                            continue
                         }
+                        let feed = SourceBankCapture(display: display, source: group.source, scale: plan.scale, fps: fps)
+                        feed.ids = group.ids
+                        feed.onFrame = { [weak self, weak feed] buffer, region in
+                            guard let self, let feed, self.captures[id]?.contains(where: { $0 === feed }) == true else { return }
+                            for wid in feed.ids {
+                                guard let entry = self.entries[wid], entry.record.displayID == id, region.contains(entry.record.native) else { continue }
+                                let native = entry.record.native
+                                let tile = entry.proxy?.worldRect.size ?? native.size
+                                let sx = tile.width / max(1, native.width), sy = tile.height / max(1, native.height)
+                                let raised = (self.raisedByParent[wid] ?? []).filter { region.contains($0.bounds) }.map { w in
+                                    let o = SourceBankGeometry.overlayFrame(raised: w.bounds, parent: native, tileHeight: native.height)
+                                    return (id: w.id, crop: SourceBankGeometry.crop(window: w.bounds, source: region),
+                                            frame: CGRect(x: o.minX * sx, y: o.minY * sy, width: o.width * sx, height: o.height * sy))
+                                }
+                                entry.proxy?.applyBankFrame(buffer, crop: SourceBankGeometry.crop(window: native, source: region), raised: raised)
+                            }
+                        }
+                        feed.onError = { [weak self, weak feed] text in
+                            guard let self, let feed, self.captures[id]?.contains(where: { $0 === feed }) == true else { return }
+                            self.captureFailed("Window-bank capture: \(text)")
+                        }
+                        feeds.append(feed)
+                        started.append(feed)
                     }
-                    feed.onError = { [weak self, weak feed] text in
-                        guard let self, self.captures[id] === feed else { return }
-                        self.captureFailed("Window-bank capture: \(text)")
-                    }
-                    fresh[id] = feed
+                    fresh[id] = feeds
                 }
-                for (id, feed) in self.captures where fresh[id] !== feed { feed.stop() }
-                let started = fresh.filter { self.captures[$0.key] !== $0.value }
+                let kept = Set(fresh.values.joined().map(ObjectIdentifier.init))
+                for feed in self.captures.values.joined() where !kept.contains(ObjectIdentifier(feed)) { feed.stop() }
                 self.captures = fresh
-                for feed in started.values { feed.start() }
+                for feed in started { feed.start() }
                 if !started.isEmpty {
-                    Log.note("Window bank: feeds " + fresh.sorted { $0.key < $1.key }.map { "\($0.key) \(Int($0.value.source.width))×\(Int($0.value.source.height)) pt at \($0.value.scale)×" }.joined(separator: ", "))
+                    Log.note("Window bank: feeds " + fresh.sorted { $0.key < $1.key }.map { id, feeds in
+                        "\(id): " + feeds.map { "\($0.ids.count)w \(Int($0.source.width))×\(Int($0.source.height)) pt" }.joined(separator: " + ") + " at \(feeds.first?.scale ?? 0)×"
+                    }.joined(separator: "; "))
                 }
                 self.onChange?()
             } catch {
@@ -650,7 +671,7 @@ final class SourceBank {
         }
     }
 
-    private func stopCaptures() { for feed in captures.values { feed.stop() }; captures.removeAll() }
+    private func stopCaptures() { for feed in captures.values.joined() { feed.stop() }; captures.removeAll() }
 
     private func fail(_ text: String) { error = text; Log.note("Window bank: \(text)"); onFailure?(text) }
     private func captureFailed(_ text: String) {

@@ -7,6 +7,29 @@ import SourceDisplay
 final class SourceBankHost: @unchecked Sendable {
     static var folder: URL { SIPRedesign.statusURL.deletingLastPathComponent().appendingPathComponent("Window Bank", isDirectory: true) }
     static var journalURL: URL { folder.appendingPathComponent("active.json") }
+    /// Where released windows went: macOS may move a window back onto a bank display when that display
+    /// returns (the next launch reuses its identity), and a window adopted from there would otherwise
+    /// take its bank spot for its home and be restored, at quit, to that spot pulled onto the screen.
+    static var returnedURL: URL { folder.appendingPathComponent("returned.json") }
+
+    struct Returned: Codable {
+        let process: BankProcess
+        let ax: CGRect
+        let cg: CGRect
+    }
+
+    private static func loadReturned() -> [String: Returned] {
+        guard let data = try? Data(contentsOf: returnedURL),
+              let all = try? JSONDecoder().decode([String: Returned].self, from: data) else { return [:] }
+        return all.filter { $0.value.process.isLive }
+    }
+
+    /// A window just went back to a physical display at `ax` (`cg` in the window list's terms).
+    private func noteReturned(_ record: BankRecord, ax: CGRect, cg: CGRect) {
+        var all = Self.loadReturned()
+        all[String(record.id)] = Returned(process: record.process, ax: ax, cg: cg)
+        if let data = try? JSONEncoder().encode(all) { try? data.write(to: Self.returnedURL, options: .atomic) }
+    }
     private let queue = DispatchQueue(label: "sunlight.bank.placement", qos: .userInitiated)
     private let token: String
     private var journal: BankJournal
@@ -169,7 +192,13 @@ final class SourceBankHost: @unchecked Sendable {
         }
         let actualAX = original   // where it is now: the AX/window-server offset below comes from this
         var originalCG = listed.bounds
-        if adopt {
+        if adopt, let home = Self.loadReturned()[String(id)], home.process == process,
+           SourceBankGeometry.restoration(home.ax, physical: physical) == home.ax {
+            // Released last time to a spot still on screen: that is its home, not where macOS put it.
+            Log.note("Window bank: \(id) was released to \(NSStringFromRect(home.ax)) last time; that stays its home")
+            original = CGRect(origin: home.ax.origin, size: original.size)
+            originalCG = CGRect(origin: home.cg.origin, size: listed.bounds.size)
+        } else if adopt {
             guard let screen = physical.first else { throw failure("No physical display is available for an adopted window.") }
             let back = SourceBankGeometry.restoration(original, physical: physical)
                 ?? CGRect(origin: CGPoint(x: screen.minX + 40, y: screen.minY + 40), size: original.size)
@@ -316,6 +345,7 @@ final class SourceBankHost: @unchecked Sendable {
         guard restored != nil else { throw failure("The app has not completed its original-window restoration.") }
         let actual = WindowList.onScreen(record.id)?.bounds ?? destination
         try forget(record.id)
+        noteReturned(record, ax: ax.frame ?? destination, cg: actual)
         return actual
     }
 

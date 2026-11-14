@@ -16,6 +16,8 @@ final class SourceBankCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     let source: CGRect
     /// Pixels per point it captures at.
     let scale: CGFloat
+    /// The banked windows it feeds: each window is fed by one stream, though others may read it too.
+    var ids: Set<CGWindowID> = []
     private var stream: SCStream?
     private var displayStream: SLDisplayStream?
     private(set) var backend = "starting"

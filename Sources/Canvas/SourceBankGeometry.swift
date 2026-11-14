@@ -109,40 +109,97 @@ enum SourceBankGeometry {
         return union.insetBy(dx: -feedHeadroom, dy: -feedHeadroom).intersection(display).integral
     }
 
-    /// What one bank's feed captures and at what density: `needed` is what must be inside it (the
-    /// windows the canvas is showing, and their menus), `source` that plus headroom, `scale` pixels per
-    /// point. The canvas draws a tile at its level of detail (`CanvasController.factor(forLevel:)`, 1 =
-    /// the window's own pixels), so a feed at full Retina density while zoomed out to a quarter
-    /// captured sixteen times the pixels anything showed.
-    struct FeedPlan: Equatable {
-        let needed: CGRect
+    /// One banked window as a feed sees it: its native frame, the raised windows (menus) hanging off
+    /// it, and the level-of-detail factor its tile is drawn at (`CanvasController.factor(forLevel:)`,
+    /// 1 = the window's own pixels; 0 = feed it without asking for detail, as for one with no picture yet).
+    struct FeedWindow: Equatable {
+        let id: CGWindowID
+        let frame: CGRect
+        var raised: [CGRect] = []
+        let factor: CGFloat
+    }
+
+    /// One display stream: the windows it feeds and the rectangle it reads (theirs plus headroom).
+    struct FeedGroup: Equatable {
+        let ids: Set<CGWindowID>
         let source: CGRect
+    }
+
+    /// A bank's feeds: by default one stream round the windows the canvas shows (`maxFeedsPerBank`), at
+    /// `scale` pixels per point. Reading less of the bank is what frees the window server (a fifth of a
+    /// bank read 99.7 frames/s where the whole read 64–67 in one run); a lower scale helped a little
+    /// (98–99 frames/s at 1.41× against 93 at 2× in another) and saves memory: eight queued frames
+    /// of a whole bank at 2× are 1.1 GB.
+    struct FeedPlan: Equatable {
+        let groups: [FeedGroup]
+        /// What each window needs inside its group's rectangle: its frame and its raised windows.
+        let needs: [CGWindowID: CGRect]
         let scale: CGFloat
+        var area: CGFloat { groups.reduce(0) { $0 + $1.source.width * $1.source.height } }
     }
 
     /// Least density a feed is captured at, whatever the zoom: an eighth of a point per pixel.
     static let minFeedScale: CGFloat = 0.125
+    /// Streams per bank at most. One: several streams on one display read less in all (WindowServer
+    /// 54–62% against 68–80%) but each delivered fewer frames (56–97 against 93–99 frames/s, owner's
+    /// windows, 2026-11-13), and frames are what's seen. `SIP_BANK_STREAMS` sets more, for measuring.
+    static let maxFeedsPerBank: Int = ProcessInfo.processInfo.environment["SIP_BANK_STREAMS"].flatMap { Int($0) }.map { max(1, $0) } ?? 1
+    /// Headroom round each group: moves and resizes within it keep the stream running. Split streams
+    /// keep it small, or the windows' headroom (they're packed 16 points apart) chains them into one.
+    static var groupHeadroom: CGFloat { maxFeedsPerBank > 1 ? min(feedHeadroom, 64) : feedHeadroom }
 
-    /// `windows`' factor 0 puts a window in the feed without asking for detail (one with no picture yet).
-    /// Nil when no window on the bank is wanted: no feed.
-    static func feedPlan(windows: [(frame: CGRect, factor: CGFloat)], raised: [CGRect], display: CGRect, fullScale: CGFloat) -> FeedPlan? {
-        guard !windows.isEmpty else { return nil }
-        let needed = (windows.map(\.frame) + raised).reduce(CGRect.null) { $0.union($1) }.intersection(display)
-        let source = feedSource(windows: windows.map(\.frame) + raised, display: display)
-        guard !needed.isNull, !source.isEmpty else { return nil }
-        let factor = min(1, windows.map(\.factor).max() ?? 1)
-        return FeedPlan(needed: needed, source: source, scale: max(minFeedScale, fullScale * factor))
+    /// Nil when no window on the bank is wanted: no feed. Windows start one group each; two groups
+    /// merge when one rectangle round both reads no more than the two do (they overlap: the overlap
+    /// was read twice), or, past `maxFeeds`, the pair that adds least. Windows are packed 16 points
+    /// apart on a bank, so a looser rule chains every neighbour into one bank-wide stream.
+    static func feedPlan(windows: [FeedWindow], display: CGRect, fullScale: CGFloat, maxFeeds: Int = maxFeedsPerBank) -> FeedPlan? {
+        var needs: [CGWindowID: CGRect] = [:]
+        var groups: [FeedGroup] = []
+        for w in windows {
+            let need = w.raised.reduce(w.frame) { $0.union($1) }.intersection(display)
+            guard !need.isNull, !need.isEmpty else { continue }
+            needs[w.id] = need
+            groups.append(FeedGroup(ids: [w.id], source: need.insetBy(dx: -groupHeadroom, dy: -groupHeadroom).intersection(display).integral))
+        }
+        guard !groups.isEmpty else { return nil }
+        func area(_ r: CGRect) -> CGFloat { r.width * r.height }
+        while groups.count > 1 {
+            var best: (i: Int, j: Int, extra: CGFloat, ratio: CGFloat)?
+            for i in 0..<groups.count {
+                for j in (i + 1)..<groups.count {
+                    let a = groups[i].source, b = groups[j].source
+                    let union = area(a.union(b)), parts = area(a) + area(b)
+                    let extra = union - parts
+                    if best == nil || extra < best!.extra { best = (i, j, extra, union / parts) }
+                }
+            }
+            guard let best, best.ratio <= 1.0 || groups.count > maxFeeds else { break }
+            let a = groups[best.i], b = groups[best.j]
+            groups.remove(at: best.j); groups.remove(at: best.i)
+            groups.append(FeedGroup(ids: a.ids.union(b.ids), source: a.source.union(b.source)))
+        }
+        let factor = min(1, windows.filter { needs[$0.id] != nil }.map(\.factor).max() ?? 1)
+        return FeedPlan(groups: groups.sorted { ($0.source.minY, $0.source.minX) < ($1.source.minY, $1.source.minX) },
+                        needs: needs, scale: max(minFeedScale, fullScale * factor))
     }
 
-    /// Whether a running feed (`source` at `scale`) must give way to `plan`: something wanted is
-    /// outside it, the density changed, or it captures over twice the area wanted (the camera moved
-    /// on, windows left the viewport). Small changes ride on the headroom; each rebuild restarts a stream.
-    static func feedNeedsRebuild(running: (source: CGRect, scale: CGFloat)?, plan: FeedPlan?) -> Bool {
-        guard let plan else { return running != nil }
-        guard let running else { return true }
-        if abs(running.scale - plan.scale) > 0.001 { return true }
-        if !running.source.contains(plan.needed) { return true }
-        return running.source.width * running.source.height > 2 * plan.source.width * plan.source.height
+    /// A running stream, as `feedNeedsRebuild` compares it with a plan.
+    struct RunningFeed: Equatable {
+        let ids: Set<CGWindowID>
+        let source: CGRect
+        let scale: CGFloat
+    }
+
+    /// Whether a bank's running streams must give way to `plan`: a wanted window isn't fed by a stream
+    /// that holds it, the density changed, or they read over 1.5 times the area wanted (windows left
+    /// the viewport). Small changes ride on the headroom; each new stream starts with a short stall.
+    static func feedNeedsRebuild(running: [RunningFeed], plan: FeedPlan?) -> Bool {
+        guard let plan else { return !running.isEmpty }
+        if running.isEmpty { return true }
+        if running.contains(where: { abs($0.scale - plan.scale) > 0.001 }) { return true }
+        for (id, need) in plan.needs where !running.contains(where: { $0.ids.contains(id) && $0.source.contains(need) }) { return true }
+        let area = running.reduce(CGFloat(0)) { $0 + $1.source.width * $1.source.height }
+        return area > 1.5 * plan.area
     }
 
     /// A window's corner radius, in pixels, from the alpha channel of a one-shot capture (row-major,

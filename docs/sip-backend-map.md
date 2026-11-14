@@ -439,10 +439,57 @@ a bank with nothing in sight runs no feed. A tile out of sight keeps its last pi
 picture yet is fed once without raising the detail. `feedNeedsRebuild` restarts a feed only when a
 wanted window is outside it, the detail level changed, or it is over twice the area wanted; an
 unchanged feed keeps running through membership changes (they used to restart every feed). Checked
-on each 30 Hz tracker tick. Status: `bank.feeds[].scale`, `bank.demand`. Not yet measured live.
+on each 30 Hz tracker tick. Status: `bank.feeds[].scale`, `bank.demand`. Measured below (builds 13–18).
 
 **Minimap.** It showed only while Sunlight was the active app, but the SIP canvas floats in front
 whichever app has the keyboard, so it came and went with every click into a tile. It now follows
 the canvas being presented (`capturedCanvasPresented`). The bank's own tile resizes (following a
 window natively, re-slots, reconcile) now redraw it (`SourceBank.onTilesChanged`); before, its marks
 kept old sizes until something else redrew it.
+
+## Builds 13–18 measured live (2026-11-13, owner away)
+
+All the owner's windows banked (Mail, Messages, Zen, Macky, T3 Code) plus three fixture windows
+redrawing at 100 Hz, 100 Hz display. `sample.py` over 6–8 s; WindowServer % from `top`.
+
+| Build, view | Bank feed (animated bank) | Feed fps | WindowServer |
+|---|---|---|---|
+| 13, overview 31% | whole bank, 1× out | 67.5 | 63% |
+| 13, 1:1 | whole bank, 2× | 64 | 61–63% |
+| 13, 1:1 panned (2 windows wanted) | 1308×1594 pt, 2× | 99.7 | 50% |
+| 14, fit 53% (one stream) | 3346×2428 pt, 1.41× | 98.4–99.4 | 68–72% |
+| 14, 1:1 | same, 2× | 93.7 | 80% |
+| 15, fit (5 streams on the bank) | ~12% less area, 1.41× | 78.7–97.1 | 59–62% |
+| 15, 1:1 (5 streams) | 2× | 56–68 | 54–56% |
+| 16, 1:1 (one stream again) | whole bank, 2× | 98.9–99.1 | 65% |
+| 16, fit | whole bank, 1.41× | 98.9–99.6 | 59–63% |
+| 17, fit, animated windows on both banks | one stream each | 71 / 57 | 64% |
+
+Findings:
+- Several display streams busy at once each deliver fewer frames, whether split on one bank (build
+  15) or one per bank with animation on both (build 17), though WindowServer CPU is lower. So the
+  default is one stream per bank (`maxFeedsPerBank`, `SIP_BANK_STREAMS` to measure more); grouping
+  code stays for that measurement.
+- Build 13's 64–67 at the whole bank didn't reproduce in builds 14 and 16 (93–99 for the same
+  rectangle), so it was run conditions (four consent dialogs had just appeared over the canvas)
+  as much as area. Reading less (demand) and a lower scale both helped in the same run.
+- Scale by level of detail halves-to-quarters the frame pool (whole bank at 2×: eight 142 MB frames).
+- Remaining limit: animation on both banks at once (57–71 frames/s). Candidates: keep windows that
+  redraw often on one bank (the stream's dirty rectangles say which), or one stream reading both.
+
+**Minimap**, verified: a click passed through to a banked window (its app frontmost, nothing entered)
+and the card stayed up; a native resize of a banked window redrew its mark at once.
+
+**Adopted windows keep their homes.** macOS moves some windows back onto a bank display when its
+identity returns at the next launch (Zen, Macky, Mail, T3 Code on different launches). Adopted, their
+bank spot became their home and quit put them there, pulled onto the screen. The host now writes
+where it released each window (`Window Bank/returned.json`, by window id and process identity) and
+an adopted window whose last release spot is still on screen keeps it. Verified: Zen adopted at
+launch, restored to its exact original frame at quit.
+
+**Seen during the run, not fixed:**
+- The left ⌘ key was stuck down at the HID level (`CGEventSource.keyState`), so test clicks arrived
+  as ⌘-clicks and entered windows. No Sunlight code posts ⌘ and the ⌘-scroll tool didn't reproduce
+  it; released with a ⌘ key-up. Watch for it.
+- The consent prompt stacked to six over four launches of new builds; rebuilding feeds within a run
+  added none.
