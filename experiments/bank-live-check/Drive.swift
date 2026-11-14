@@ -79,6 +79,7 @@ case "click":
     let hold = a.count > 4 ? useconds_t(Double(a[4])! * 1000) : 60_000   // optional hold, ms
     post(.mouseMoved, p); usleep(150_000)
     post(.leftMouseDown, p); usleep(hold); post(.leftMouseUp, p)
+    usleep(50_000)   // a release posted right before exiting was occasionally never delivered
 case "dockitem":
     guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else { exit(1) }
     func items(_ e: AXUIElement, _ depth: Int) -> [AXUIElement] {

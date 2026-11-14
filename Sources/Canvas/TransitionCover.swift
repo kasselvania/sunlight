@@ -49,6 +49,8 @@ final class TransitionCover {
     }
 
     private let screen: NSScreen
+    /// The main display in global top-left points (its origin is the global origin).
+    private var screenRect: CGRect { CGRect(origin: .zero, size: screen.frame.size) }
 
     private static func layer(for image: CGImage?, frame: CGRect, scale: CGFloat) -> CALayer {
         let l = CALayer()
@@ -68,6 +70,41 @@ final class TransitionCover {
     /// Puts a picture of the main display up at once, before anything moves; then, the windows captured
     /// one by one, the same picture as a wallpaper with the windows on it, ready to fly. Nil when the
     /// screen can't be captured: no cover, nothing else changes.
+    /// Gives up after `seconds` (nil: no cover), so a capture that never answers can't hold the launch.
+    static func coverDesktop(within seconds: TimeInterval) async -> (cover: TransitionCover, pieces: [Piece])? {
+        let box = CoverBox()
+        let work = Task { @MainActor in
+            let result = await coverDesktop()
+            if !box.settle(result != nil) { result?.cover.close() } else { box.result = result }
+            return result
+        }
+        let deadline = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if box.settle(false) { Log.note("Transition: the screen couldn't be captured within \(seconds) s; starting uncovered") }
+        }
+        await box.wait()
+        work.cancel(); deadline.cancel()
+        return box.result
+    }
+
+    /// The first of the capture and the deadline to finish decides.
+    @MainActor private final class CoverBox {
+        var result: (cover: TransitionCover, pieces: [Piece])?
+        private var settled = false
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        /// True when this call decided (it came first).
+        func settle(_ ok: Bool) -> Bool {
+            guard !settled else { return false }
+            settled = true
+            DispatchQueue.main.async { let w = self.waiters; self.waiters = []; w.forEach { $0.resume() } }
+            return true
+        }
+        func wait() async {
+            if settled { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+    }
+
     static func coverDesktop() async -> (cover: TransitionCover, pieces: [Piece])? {
         guard let screen = NSScreen.main, CGPreflightScreenCaptureAccess(),
               let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true),
@@ -141,7 +178,12 @@ final class TransitionCover {
         }
         Self.animate(backdrop, opacity: 0)
         for (id, l) in fliers {
-            if let to = targets[id] { Self.animate(l, to: to, shadow: 0) } else { Self.animate(l, opacity: 0) }
+            // A tile off screen (the camera left zoomed in): the window heads its way and fades as it goes.
+            if let to = targets[id] {
+                let seen = to.intersection(screenRect)
+                let mostlyOff = seen.isNull || seen.width * seen.height < 0.25 * to.width * to.height
+                Self.animate(l, to: to, opacity: mostlyOff ? 0 : nil, shadow: 0)
+            } else { Self.animate(l, opacity: 0) }
         }
         CATransaction.commit()
     }

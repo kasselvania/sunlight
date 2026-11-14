@@ -596,3 +596,23 @@ not run in this window (explicit `CABasicAnimation`s do).
 Measured: launch waited 0.6–2.0 s for pictures, 7 of 7 windows flew; quit, a frame during the hold
 and a frame after the cover went are identical apart from the menu bar; windows restored exactly.
 With the camera left at 1:1 most tiles are off screen, so most launch flights leave the screen.
+
+## Lost releases: a test-tool artifact (2026-11-13)
+
+Measured with `ClickFixture.swift` (an app-level monitor logs every press and release it receives) and
+guarded clicks (`gclick.sh`: Sunlight running, the tile under the point, no consent prompt within 60 pt).
+Through a tile, every press arrived and about one release in seventy never did; the canvas's session
+tap never saw those releases, and afterwards even the HID state said the button was down. Clicking the
+app's real window with Sunlight quit lost none (150/150). The cause was the click tool: it exited the
+moment it posted the release, and under load that last event was sometimes never delivered. With 50 ms
+before exit: 200/200 through a tile. Real input devices don't do that. Kept: two log lines on the paths
+where Sunlight itself could drop a held release (tap disabled by timeout, queue cleared).
+
+## Hazards met while testing (2026-11-13)
+
+- Every new build brings a new consent prompt; unanswered, they stacked to about 38 windows across the
+  screen. `safe.swift` refuses any click or drag start within reach of one.
+- `replayd` (macOS screen capture) crashed with an exception in its XPC connection error handler at
+  several Sunlight quits (reports at 18:18, 18:32, 18:51, 19:46, 19:49) and launchd throttled its
+  restarts; screen capture was unavailable system-wide for a few minutes. The launch cover now gives up
+  after 1.5 s (Sunlight had waited forever for its first picture, and a test then clicked into Zen).

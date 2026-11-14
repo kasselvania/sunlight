@@ -310,7 +310,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         Task { [weak self] in
             // The desktop's picture goes up before the bank's displays appear (macOS reshuffles windows
             // then) and stays until the canvas is ready under it (`flyIntoCanvas`).
-            if Settings.sunlightOn, let covered = await TransitionCover.coverDesktop() {
+            // Never held up by it: screen capture can be unavailable (replayd restarting after a crash
+            // left Sunlight waiting forever, 2026-11-13), and then Sunlight starts uncovered.
+            if Settings.sunlightOn, let covered = await TransitionCover.coverDesktop(within: 1.5) {
                 self?.launchCover = covered.cover
             }
             await bank.startBeforeDiscovery()

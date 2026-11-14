@@ -57,6 +57,7 @@ final class CapturedInputEvents {
     }
 
     func releaseToCanvas(replay: Bool = false) {
+        if !queue.isEmpty, !replay { Log.note("Captured input: \(queue.count) held event(s) dropped (types \(queue.map(\.type.rawValue)))") }
         if replay && active && !resolved {
             let held = queue; queue.removeAll()
             DispatchQueue.main.async { [canvas] in
@@ -98,6 +99,7 @@ final class CapturedInputEvents {
 
     private func route(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            Log.note("Captured input: the event tap was disabled (\(type == .tapDisabledByTimeout ? "timeout" : "user input")), \(queue.count) held")
             releaseToCanvas()
             if let port { CGEvent.tapEnable(tap: port, enable: true) }
             let cancelled = cancelled
