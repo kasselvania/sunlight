@@ -575,3 +575,24 @@ window returned to its bank, nothing entered.
 The stuck ⌘ seen in earlier runs was the test tool: `Drive.swift key` sent ⌘ as a flag on the key
 event only, which leaves the HID state with ⌘ held (reproduced with Sunlight not running). It now
 presses and releases the modifier keys themselves.
+
+## Build 26: covered launch and quit (2026-11-13, run live)
+
+Recorded before (ffmpeg, 30 fps): at launch the windows reshuffled as the bank displays appeared,
+then about 1.5 s of grey empty tiles; at quit the canvas vanished and the windows flashed up in
+another order before settling.
+
+`TransitionCover`: a borderless window at `.screenSaver` level.
+- Launch: before the bank starts, a ScreenCaptureKit picture of the main display goes up, then the
+  same look in pieces (the desktop without its ordinary windows, and each window captured on its own,
+  back to front). Behind it the bank parks the windows and the canvas starts; once every banked window
+  has a feed picture (`SourceBank.allPictured`, 5 s at most) the pieces fly to their tiles' places
+  (`CanvasController.tileGlobalRect`; tiles hidden meanwhile) while the wallpaper fades into the canvas.
+- Quit: the tiles' current pictures (IOSurface and crop) are laid over the canvas, then fly to the
+  windows' homes (`SourceBank.homes`) while the canvas fades out, the windows still parked; then the
+  bank puts them back under their pictures and the cover goes with the process.
+Gotchas: a view's own layer drops `isGeometryFlipped` (drawn upside down); implicit animations did
+not run in this window (explicit `CABasicAnimation`s do).
+Measured: launch waited 0.6–2.0 s for pictures, 7 of 7 windows flew; quit, a frame during the hold
+and a frame after the cover went are identical apart from the menu bar; windows restored exactly.
+With the camera left at 1:1 most tiles are off screen, so most launch flights leave the screen.

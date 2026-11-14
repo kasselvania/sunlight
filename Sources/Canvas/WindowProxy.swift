@@ -700,6 +700,14 @@ final class WindowProxy {
         return content
     }
 
+    /// What the tile shows now, for a picture of it elsewhere (`TransitionCover`): contents, the part of
+    /// them shown, and the corner radius.
+    var coverPicture: (contents: Any, rect: CGRect, radius: CGFloat)? {
+        if let c = bankContent, let contents = c.contents { return (contents, c.contentsRect, cornerRadius) }
+        if let contents = layer.contents { return (contents, layer.contentsRect, cornerRadius) }
+        return nil
+    }
+
     /// The window's own corner radius, measured from a one-shot capture's alpha (`SourceBank`): the tile,
     /// its shadow and its hover border take it.
     func setMeasuredCornerRadius(_ radius: CGFloat) {

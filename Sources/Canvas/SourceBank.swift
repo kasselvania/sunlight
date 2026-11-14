@@ -147,6 +147,21 @@ final class SourceBank {
          "error": error ?? ""]
     }
 
+    /// Where each banked window goes back to on the desktop, at its present size (`TransitionCover`).
+    var homes: [CGWindowID: CGRect] {
+        Dictionary(uniqueKeysWithValues: entries.values.map { e in
+            (e.record.id, CGRect(origin: e.record.originalCG.origin, size: e.record.native.size))
+        })
+    }
+
+    /// Every banked window has a picture from a feed, and none is being placed: the canvas is ready to
+    /// be seen.
+    var allPictured: Bool {
+        phase == "running" && !entries.isEmpty && placing.isEmpty && entries.values.allSatisfy { $0.proxy?.hasBankFrame == true }
+    }
+
+    var bankedIDs: Set<CGWindowID> { Set(entries.keys) }
+
     func protects(_ id: CGWindowID) -> Bool { entries[id] != nil || pending.contains(id) }
     func contains(_ id: CGWindowID) -> Bool { entries[id] != nil }
 

@@ -265,8 +265,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             let quitEvent = NSAppleEventManager.shared().currentAppleEvent
             Task { [weak self] in
                 guard let self else { return }
+                // The way out: the tiles fly to the windows' places as the canvas fades, the windows
+                // still parked; they're put back under their pictures, and the cover goes with the app.
+                if let desk = self.canvas, let bank = desk.sourceBank, desk.lead.window.isVisible, !bank.bankedIDs.isEmpty {
+                    let pieces = desk.lead.coverPieces(of: bank.bankedIDs)
+                    await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
+                        self.quitCover = TransitionCover.coverCanvasAndFlyOut(pieces: pieces, homes: bank.homes,
+                            fadeCanvas: { d in desk.canvases.forEach { $0.fadeOutForQuit(d) } },
+                            then: { done.resume() })
+                        if self.quitCover == nil { done.resume() }
+                    }
+                    Log.note("Transition: out of the canvas, \(pieces.count) windows flown home")
+                }
                 let restored = await self.canvas?.sourceBank?.stop() ?? true
                 guard restored else {
+                    self.quitCover?.close(); self.quitCover = nil
+                    self.canvas?.canvases.forEach { $0.window.alphaValue = 1 }
                     self.sipStopping = false
                     NSApp.reply(toApplicationShouldTerminate: false)
                     return
@@ -294,8 +308,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     private func startSIPCanvas() {
         let bank = SourceBank()
         Task { [weak self] in
+            // The desktop's picture goes up before the bank's displays appear (macOS reshuffles windows
+            // then) and stays until the canvas is ready under it (`flyIntoCanvas`).
+            if Settings.sunlightOn, let covered = await TransitionCover.coverDesktop() {
+                self?.launchCover = covered.cover
+            }
             await bank.startBeforeDiscovery()
             self?.finishSIPCanvas(bank)
+        }
+    }
+
+    /// The way out's cover, held until the process ends with the windows back under it.
+    private var quitCover: TransitionCover?
+
+    /// The launch's cover (`TransitionCover`), up until the canvas under it is ready.
+    private var launchCover: TransitionCover?
+
+    /// Waits for the banked windows' pictures (5 s at most), then flies them from the desktop to their
+    /// tiles and lets the cover go.
+    private func flyIntoCanvas(_ desk: Desk, started: CFTimeInterval = CACurrentMediaTime()) {
+        guard let cover = launchCover else { return }
+        let bank = desk.sourceBank
+        let waited = CACurrentMediaTime() - started
+        guard (bank?.allPictured ?? true) || waited > 5 else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in self?.flyIntoCanvas(desk, started: started) }
+            return
+        }
+        // A beat for the layout's own placement to settle once the pictures are in.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+            guard let self else { return }
+            self.launchCover = nil
+            var targets: [CGWindowID: CGRect] = [:]
+            for id in cover.ids { if let r = desk.lead.tileGlobalRect(id) { targets[id] = r } }
+            let flown = Set(targets.keys)
+            desk.lead.setTiles(flown, shown: false)
+            Log.note("Transition: into the canvas, \(flown.count) of \(cover.ids.count) windows flying (waited \(String(format: "%.1f", waited)) s)")
+            cover.flyIn(to: targets) { desk.lead.setTiles(flown, shown: true) }
         }
     }
 
@@ -332,9 +380,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         installSignalHandlers()
         if Settings.sunlightOn {
             desk.show()
+            flyIntoCanvas(desk)
         } else {
             desk.setPaused(true)
             takeover.suspendInput()
+            launchCover?.close(); launchCover = nil
         }
         if let error = bank.error { CanvasToast.show(error, in: desk.lead.overlay) }
         sipStatusTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in

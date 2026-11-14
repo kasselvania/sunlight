@@ -5886,6 +5886,36 @@ final class CanvasController {
     private func global(_ camera: Camera) -> Camera { camera.global(viewOrigin: display.origin) }
 
     /// View point or rect to global, and back.
+    /// A tile where it is on screen, in global top-left points (`TransitionCover`).
+    func tileGlobalRect(_ id: CGWindowID) -> CGRect? {
+        guard let p = proxies[id], p.kind == .window, p.away == nil else { return nil }
+        return toGlobal(view.camera.toScreen(p.worldRect))
+    }
+
+    /// Every window tile's picture and place, for the way out (`TransitionCover`), top first.
+    func coverPieces(of ids: Set<CGWindowID>) -> [(id: CGWindowID, contents: Any, rect: CGRect, radius: CGFloat, frame: CGRect)] {
+        view.proxies.reversed().compactMap { p in
+            guard ids.contains(p.windowID), let pic = p.coverPicture, let frame = tileGlobalRect(p.windowID) else { return nil }
+            return (p.windowID, pic.contents, pic.rect, pic.radius, frame)
+        }
+    }
+
+    /// Tiles drawn or not, while their pictures fly over the canvas (`TransitionCover`).
+    func setTiles(_ ids: Set<CGWindowID>, shown: Bool) {
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        for id in ids { proxies[id]?.layer.opacity = shown ? 1 : 0 }
+        CATransaction.commit()
+    }
+
+    /// The canvas fades out for the way out (`TransitionCover`).
+    func fadeOutForQuit(_ duration: CFTimeInterval) {
+        guard window.isVisible else { return }
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = duration
+            window.animator().alphaValue = 0
+        }
+    }
+
     private func toGlobal(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x + display.origin.x, y: p.y + display.origin.y) }
     private func toGlobal(_ r: CGRect) -> CGRect { r.offsetBy(dx: display.origin.x, dy: display.origin.y) }
     private func toView(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x - display.origin.x, y: p.y - display.origin.y) }
