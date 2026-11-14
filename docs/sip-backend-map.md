@@ -562,3 +562,16 @@ banked, nothing entered. Let go over empty canvas: "nothing took them", no stuck
 Limits: a file the app only promises (browsers often promise the image file and also put its URL,
 HTML and sometimes TIFF on the pasteboard) isn't carried, only what's on the pasteboard at the start;
 not yet tried with a real browser image. Drops onto Finder's desktop from a banked app are untested.
+
+### Build 23 with a real browser (2026-11-13)
+
+Dragging a photo out of Zen's tile (X, at 1:1) onto the drop-target fixture's tile: carried, sprang
+open, dropped. The fixture received `public.png`, `public.tiff`, `public.url`, `public.html`,
+`public.file-url`, file-promise types and the photo's URL as text: the picture itself came across.
+Gotcha met on the way: with text selected in the page, Firefox-based browsers drag the selection even
+from an image inside it (two attempts carried HTML/text of the selection). The canvas came back, the
+window returned to its bank, nothing entered.
+
+The stuck ⌘ seen in earlier runs was the test tool: `Drive.swift key` sent ⌘ as a flag on the key
+event only, which leaves the HID state with ⌘ held (reproduced with Sunlight not running). It now
+presses and releases the modifier keys themselves.

@@ -106,7 +106,21 @@ case "key":
         e.flags = flags
         e.post(tap: .cghidEventTap)
     }
-    switch a[4] { case "down": send(true); case "up": send(false); default: send(true); usleep(40_000); send(false) }
+    // Modifiers as their own keys around the press: a flag on the key event alone leaves the HID state
+    // with ⌘ held down afterwards (2026-11-13: every later click arrived as a ⌘-click).
+    let mods: [(CGEventFlags, CGKeyCode)] = [(.maskCommand, 55), (.maskShift, 56), (.maskAlternate, 58), (.maskControl, 59)]
+    func modifiers(_ down: Bool) {
+        for (flag, code) in mods where flags.contains(flag) {
+            let e = CGEvent(keyboardEventSource: src, virtualKey: code, keyDown: down)!
+            e.flags = down ? flags : []
+            e.post(tap: .cghidEventTap)
+        }
+    }
+    switch a[4] {
+    case "down": modifiers(true); send(true)
+    case "up": send(false); modifiers(false)
+    default: modifiers(true); send(true); usleep(40_000); send(false); modifiers(false)
+    }
 case "mouse":
     let l = CGEvent(source: nil)!.location
     print(l.x, l.y)
