@@ -652,3 +652,17 @@ Found on the way: a fixed wait let the quit's Dock restart cut the last switch s
 stayed frozen mid-switch (screenshots kept showing 9:09 PM) until another ⌃← finished it. Each switch
 now waits for the map to agree, and the carry always returns to the starting Desktop, confirmed.
 Tools: `carry.swift`, `spacekey.swift`, `spaces.swift`.
+
+## Merged Sunlight 0.3.1 (2026-11-15)
+
+Upstream 0.2.5, 0.3 and 0.3.1 merged onto the SIP branch. One textual conflict (the title-strip click in
+`CanvasView`, now: SIP or scaled windows, and ⌘-click when single clicks zoom). Build and 660 tests pass;
+not yet run live.
+
+- 0.2.5 keeps windows in macOS's own full screen ("away"). `SpacesCarry` walked only Desktops, but ⌃← / ⌃→
+  steps through full-screen apps' Spaces too: the count is now over both, and a window whose way crosses a
+  full-screen Space stays on its Desktop (carrying a held window through one is untried). The Desktop is
+  remembered at launch and the steps counted again at quit.
+- Open: 0.2.5's green-button-as-Sunlight-full-screen is for the entered window only. Under SIP banked
+  windows aren't entered, so a click on a banked window's green button is still macOS's full screen, on
+  the bank's virtual display. Untested; likely the window goes to a Space nobody can see.

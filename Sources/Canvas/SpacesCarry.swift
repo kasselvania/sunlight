@@ -14,6 +14,9 @@ enum SpacesCarry {
     struct Origin: Codable, Equatable {
         let id: CGWindowID
         let offset: Int
+        /// The Desktop it came from: at quit the steps there are counted again, since a full-screen app
+        /// may have opened (or the Desktop gone) meanwhile.
+        let space: Int
     }
 
     // MARK: The Desktop map (read-only SkyLight)
@@ -27,8 +30,11 @@ enum SpacesCarry {
         return unsafeBitCast(s, to: T.self)
     }
 
-    /// The main display's Desktops in order (ordinary ones only) and the current one.
-    private static func desktops() -> (ids: [Int], current: Int)? {
+    /// The main display's Spaces in the order ⌃← / ⌃→ walks them, the current one, and which of them are
+    /// full-screen apps' (type 4) rather than Desktops (type 0). The walk steps through both: counting
+    /// Desktops alone miscounted the steps past a full-screen app (found reading Sunlight 0.3, which keeps
+    /// full-screen windows, 2026-11-15).
+    private static func desktops() -> (ids: [Int], current: Int, fullScreen: Set<Int>)? {
         guard let main = symbol("SLSMainConnectionID", as: MainConnection.self),
               let copy = symbol("SLSCopyManagedDisplaySpaces", as: CopySpaces.self),
               let displays = copy(main())?.takeRetainedValue() as? [[String: Any]],
@@ -36,8 +42,22 @@ enum SpacesCarry {
               let mainID = CFUUIDCreateString(nil, uuid) as String? else { return nil }
         let display = displays.first { ($0["Display Identifier"] as? String) == mainID } ?? displays.first
         guard let display, let current = (display["Current Space"] as? [String: Any])?["ManagedSpaceID"] as? Int else { return nil }
-        let ids = (display["Spaces"] as? [[String: Any]] ?? []).filter { ($0["type"] as? Int) == 0 }.compactMap { $0["ManagedSpaceID"] as? Int }
-        return (ids, current)
+        var ids: [Int] = [], fullScreen: Set<Int> = []
+        for space in display["Spaces"] as? [[String: Any]] ?? [] {
+            guard let id = space["ManagedSpaceID"] as? Int, let type = space["type"] as? Int, type == 0 || type == 4 else { continue }
+            ids.append(id)
+            if type == 4 { fullScreen.insert(id) }
+        }
+        return (ids, current, fullScreen)
+    }
+
+    /// Steps from Space `here` to Desktop `there` in `order`; nil when `there` is a full-screen app's Space
+    /// or the way crosses one (a window held through a full-screen Space hasn't been tried: it stays put).
+    nonisolated static func steps(from here: Int, to there: Int, order: [Int], fullScreen: Set<Int>) -> Int? {
+        guard let i = order.firstIndex(of: here), let j = order.firstIndex(of: there), i != j,
+              !fullScreen.contains(there) else { return nil }
+        let between = order[(min(i, j) + 1)..<max(i, j)]
+        return between.contains(where: fullScreen.contains) ? nil : j - i
     }
 
     private static func spaces(of id: CGWindowID) -> [Int] {
@@ -47,20 +67,28 @@ enum SpacesCarry {
         return list.map(\.intValue)
     }
 
-    /// Ordinary windows of running, unhidden apps that live on another Desktop of the main display.
-    static func windowsElsewhere() -> [(id: CGWindowID, pid: pid_t, frame: CGRect, offset: Int)] {
-        guard let map = desktops(), let here = map.ids.firstIndex(of: map.current) else { return [] }
+    /// Ordinary windows of running, unhidden apps that live on another Desktop of the main display, with the
+    /// steps there; `beyondFullScreen` counts those left out because a full-screen app's Space is in the way.
+    static func windowsElsewhere() -> (windows: [(id: CGWindowID, pid: pid_t, frame: CGRect, offset: Int, space: Int)], beyondFullScreen: Int) {
+        guard let map = desktops(), map.ids.contains(map.current) else { return ([], 0) }
         let onScreen = Set(WindowList.onScreen().map(\.id))
         let all = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
-        return all.compactMap { w in
+        var beyond = 0
+        let windows: [(id: CGWindowID, pid: pid_t, frame: CGRect, offset: Int, space: Int)] = all.compactMap { w in
             guard (w[kCGWindowLayer as String] as? Int) == 0, let id = w[kCGWindowNumber as String] as? CGWindowID,
                   !onScreen.contains(id), let pid = w[kCGWindowOwnerPID as String] as? pid_t, pid != getpid(),
                   let d = w[kCGWindowBounds as String] as! CFDictionary?, let frame = CGRect(dictionaryRepresentation: d),
                   frame.width >= 200, frame.height >= 150,
                   let app = NSRunningApplication(processIdentifier: pid), !app.isHidden, app.activationPolicy == .regular,
-                  let space = spaces(of: id).first, space != map.current, let there = map.ids.firstIndex(of: space) else { return nil }
-            return (id, pid, frame, there - here)
+                  let space = spaces(of: id).first, space != map.current, map.ids.contains(space),
+                  !map.fullScreen.contains(space) else { return nil }
+            guard let offset = steps(from: map.current, to: space, order: map.ids, fullScreen: map.fullScreen) else {
+                beyond += 1
+                return nil
+            }
+            return (id, pid, frame, offset, space)
         }
+        return (windows, beyond)
     }
 
     // MARK: Carrying
@@ -168,7 +196,8 @@ enum SpacesCarry {
     /// Brings every window on another Desktop to this one; returns where each came from. The pointer
     /// goes back where it was.
     static func gather() async -> [Origin] {
-        let elsewhere = windowsElsewhere()
+        let (elsewhere, beyond) = windowsElsewhere()
+        if beyond > 0 { Log.note("Spaces: \(beyond) window(s) stay on their Desktops: a full-screen app's Space is on the way there") }
         guard !elsewhere.isEmpty else { return [] }
         guard shortcutsOn else {
             Log.note("Spaces: \(elsewhere.count) window(s) on other Desktops stay there: the ⌃←/⌃→ Desktop shortcuts are off")
@@ -191,7 +220,7 @@ enum SpacesCarry {
             let back = desktops()
             let arrived = back.map { spaces(of: w.id).contains($0.current) } ?? false
             Log.note("Spaces: window \(w.id) from \(w.offset > 0 ? "+" : "")\(w.offset) Desktop(s) \(arrived ? "brought here" : "did not come")")
-            if arrived { origins.append(Origin(id: w.id, offset: w.offset)) }
+            if arrived { origins.append(Origin(id: w.id, offset: w.offset, space: w.space)) }
             await returnHome(home)
         }
         await returnHome(home)
@@ -206,16 +235,21 @@ enum SpacesCarry {
         let home = desktops()?.current
         for o in origins {
             guard let w = WindowList.onScreen(o.id) else { continue }
+            guard let map = desktops(),
+                  let offset = steps(from: map.current, to: o.space, order: map.ids, fullScreen: map.fullScreen) else {
+                Log.note("Spaces: window \(o.id) stays on this Desktop: its own is gone, or a full-screen app's Space is on the way")
+                continue
+            }
             NSRunningApplication(processIdentifier: w.pid)?.activate(options: [])
             await pause(0.25)
             guard let p = grabPoint(pid: w.pid, frame: w.bounds) else {
                 Log.note("Spaces: no title bar to hold on window \(o.id); it stays on this Desktop")
                 continue
             }
-            await carry(at: p, steps: o.offset)
-            await switchDesktop(-o.offset)
+            await carry(at: p, steps: offset)
+            await switchDesktop(-offset)
             await returnHome(home)
-            Log.note("Spaces: window \(o.id) taken back \(o.offset > 0 ? "+" : "")\(o.offset) Desktop(s)")
+            Log.note("Spaces: window \(o.id) taken back \(offset > 0 ? "+" : "")\(offset) Desktop(s)")
         }
         await returnHome(home)
         if let pointer { CGWarpMouseCursorPosition(pointer) }
