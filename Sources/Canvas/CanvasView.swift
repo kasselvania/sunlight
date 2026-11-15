@@ -431,6 +431,8 @@ final class CanvasView: NSView {
         var veil: CAShapeLayer?
         /// A close: what to do once the window is gone from sight.
         var completion: (() -> Void)?
+        /// Not begun before this: the Dock takes the real window out of sight first (`holdEntrance`).
+        var waitsUntil: CFTimeInterval = 0
     }
     private var entrances: [Entrance] = []
     /// Closed windows held gone (their last frame) until the listing drops them, or the close is undone.
@@ -516,7 +518,7 @@ final class CanvasView: NSView {
         hudPerf.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
         hudPerf.fontSize = 10
         hudPerf.actions = ["position": NSNull(), "contents": NSNull()]
-        hudPerf.bounds = CGRect(x: 0, y: 0, width: 720, height: 13)
+        hudPerf.bounds = CGRect(x: 0, y: 0, width: 960, height: 13)
         layer?.addSublayer(hudPerf)
         if perf.enabled {
             perf.onSummary = { [weak self] line in self?.hudPerf.string = line }
@@ -1320,8 +1322,12 @@ final class CanvasView: NSView {
             completion?()
             return
         }
-        flight = Flight(path: path, spring: Spring(x0: -1, v0: speed / path.length),
-                        start: CACurrentMediaTime(), completion: completion)
+        // `defaults write com.spacefarm.sunlight FlightResponse 0.4` (and `FlightDamping 0.85`) try another
+        // tempo and bounce, read at each flight, for tuning.
+        let defaults = UserDefaults.standard
+        let spring = FlightSpring.spring(from: speed / path.length, response: defaults.double(forKey: "FlightResponse"),
+                                         damping: defaults.double(forKey: "FlightDamping"))
+        flight = Flight(path: path, spring: spring, start: CACurrentMediaTime(), completion: completion)
         startDisplayLink()
         onViewportChanged?()
     }
@@ -1407,12 +1413,14 @@ final class CanvasView: NSView {
         }
         lastTarget = now
         let coalesced = pending.events
-        tickInput(at: now)
-        tickCamera(at: now)
-        tickEntrances(at: now)
-        tickMagnet(at: now)
-        tickPip(at: now)
-        settleIfStill(at: now)   // may start a move of its own, which keeps the link
+        Watchdog.during("a frame of the canvas (CanvasView.tick)") {
+            tickInput(at: now)
+            tickCamera(at: now)
+            tickEntrances(at: now)
+            tickMagnet(at: now)
+            tickPip(at: now)
+            settleIfStill(at: now)   // may start a move of its own, which keeps the link
+        }
         lastTick = now
         perf.tick(apply: CACurrentMediaTime() - began, coalesced: coalesced, missed: missed)
         stopLinkIfIdle()   // after the completions: one may have started the next move
@@ -1440,7 +1448,7 @@ final class CanvasView: NSView {
     private func tickCamera(at now: CFTimeInterval) {
         if let f = flight {
             let (x, v) = f.spring.evaluate(at: CGFloat(now - f.start))
-            if abs(x) < 0.002, abs(v) < 0.02 {
+            if FlightSpring.isAtRest(x, v) {
                 camera = f.path.camera(at: 1)
                 applyCamera()
                 onFlightProgress?(1)
@@ -1580,6 +1588,20 @@ final class CanvasView: NSView {
         onEntranceChanged?()
     }
 
+    /// A window's opening begins again from its first frame at `until`, and holds there till then: the
+    /// real window is out of sight meanwhile, so none of the effect's motion is spent where nobody sees it
+    /// (Dealt's slide, nearly over by then, showed as a jump the moment the window came into sight).
+    func holdEntrance(of proxy: WindowProxy, until: CFTimeInterval) {
+        guard let i = entrances.firstIndex(where: { $0.proxy === proxy && $0.opening }) else { return }
+        entrances[i].start = nil
+        entrances[i].waitsUntil = until
+    }
+
+    /// Whether a window's close has played out and it is held gone, waiting for its app to close it.
+    func isHeldClosed(_ proxy: WindowProxy) -> Bool {
+        held.contains { $0.proxy === proxy }
+    }
+
     /// Whether a window is playing its close, or held gone after it.
     func isClosing(_ proxy: WindowProxy) -> Bool {
         held.contains { $0.proxy === proxy } || entrances.contains { $0.proxy === proxy && !$0.opening }
@@ -1670,7 +1692,7 @@ final class CanvasView: NSView {
     private func advance(_ e: inout Entrance, at now: CFTimeInterval, moving: Set<ObjectIdentifier> = []) -> Bool {
         // Not before there is something to show: a capture proxy's grey placeholder shouldn't pop and
         // then have the texture land mid-spring. An unstreamable window shows the placeholder after all.
-        if e.start == nil, e.proxy.hasFrame || e.proxy.usesRealWindow || now - e.added > 1.5 {
+        if e.start == nil, now >= e.waitsUntil, e.proxy.hasFrame || e.proxy.usesRealWindow || now - e.added > 1.5 {
             e.start = now
         }
         let geometry = geometry(of: e)
@@ -2281,9 +2303,6 @@ final class CanvasView: NSView {
     var onPassThrough: ((WindowProxy) -> Void)?
     /// A click on a window's title strip while windows are used at any zoom: focus it, no zoom.
     var onFocus: ((WindowProxy) -> Void)?
-    /// With the clicks swapped (`Settings.scaledClickZooms`), the second click of a double-click: the
-    /// first click's way in is dropped and the window is focused where it was.
-    var onClickFocus: ((WindowProxy) -> Void)?
 
     /// Windows are used where they're drawn (`Settings.useScaledWindows`, with live windows).
     var scaledWindowsInUse: Bool { Settings.useScaledWindows && showsRealWindows }
@@ -2695,8 +2714,7 @@ final class CanvasView: NSView {
         clickEntering = nil
         if event.clickCount >= 2, let p = entering {
             dragging = nil
-            // Using windows at any zoom with the clicks swapped, the double-click focuses it where it was.
-            if scaledWindowsInUse, Settings.scaledClickZooms { onClickFocus?(p) } else { onHandoff?(p) }
+            onHandoff?(p)
             return
         }
         let ground = floorHit(at: worldPoint)
@@ -2785,7 +2803,7 @@ final class CanvasView: NSView {
             // click usually lands while the first is on its way in, above).
             if event.clickCount >= 2, p.kind == .window {
                 dragging = nil
-                if scaledWindowsInUse, Settings.scaledClickZooms { onClickFocus?(p) } else { onHandoff?(p) }
+                onHandoff?(p)
                 return
             }
             // The press brings it to the front, with its group; a drag moves it.
@@ -2948,13 +2966,16 @@ final class CanvasView: NSView {
                 // One click uses a widget, as on the desktop, right away: there's no double-click to wait for.
                 let r = d.proxy.worldRect
                 onPress?(d.proxy, CGPoint(x: r.minX + d.grabOffset.x, y: r.minY + d.grabOffset.y))
-            case .window where (scaledWindowsInUse || SIPRedesign.enabled) && !Settings.scaledClickZooms:
+            case .window where (scaledWindowsInUse || SIPRedesign.enabled) && (!Settings.scaledClickZooms || event.modifierFlags.contains(.command)):
                 // Using windows at any zoom, a click on the title strip focuses the window where it is,
                 // as a click in its content does; a double-click brings it to the middle (`mouseDown`).
+                // With the clicks swapped a click brings it to the middle and a ⌘-click focuses it here.
                 onFocus?(d.proxy)
             case .window:
                 // Brought to the front on the press. Zoomed in or out, the click enters it at 1:1 right
                 // where it is, around the clicked spot; a double-click brings it to the middle instead.
+                // Using windows at any zoom with the clicks swapped, the click brings it to the middle
+                // (`CanvasController.clickEnter`) at once.
                 clickEntering = d.proxy
                 onClickEnter?(d.proxy, d.start, d.grabOffset)
             }
