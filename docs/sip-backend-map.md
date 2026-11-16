@@ -666,3 +666,13 @@ not yet run live.
 - Open: 0.2.5's green-button-as-Sunlight-full-screen is for the entered window only. Under SIP banked
   windows aren't entered, so a click on a banked window's green button is still macOS's full screen, on
   the bank's virtual display. Untested; likely the window goes to a Space nobody can see.
+
+## Build 37: the launch cover stayed up (2026-11-16)
+
+Seen by the owner on build 36: after launch the whole screen stayed a still picture (the launch cover,
+window level 1000, at alpha 1) while Sunlight ran normally underneath; clicks went through to windows
+nobody could see. Cause: `flyIntoCanvas` let go of the cover as the flight began and the flight's
+completion held it weakly, so `close()` never ran. Now the flight holds the cover until it lands, a timer
+takes it down 0.75 s after the flight should have ended, and no going-in cover stands longer than 10 s.
+Same run: Zen (1331×1417) and Blender (3430×1417) "don't fit in the source banks" and stayed on the real
+display, live, outside the canvas.

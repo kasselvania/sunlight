@@ -122,6 +122,7 @@ final class TransitionCover {
         let cover = TransitionCover(screen: screen)
         cover.backdrop.contents = whole
         cover.window.orderFrontRegardless()
+        cover.limitLifetime()
 
         // The desktop's own windows (wallpaper, files) under everything; ordinary windows front to back.
         let order = (CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? [])
@@ -166,16 +167,27 @@ final class TransitionCover {
     /// The canvas is ready behind the cover: each window flies from the desktop to its tile (`targets`,
     /// global top-left points; a window without one fades where it is) while the wallpaper fades into
     /// the canvas. `then` runs once they've landed, with the cover gone.
+    /// The cover holds itself until it has closed: the caller lets go once the flight starts, and a weak
+    /// hold here left the cover up for good, a frozen picture over the whole screen (2026-11-16).
     func flyIn(to targets: [CGWindowID: CGRect], then: @escaping () -> Void) {
+        var landed = false
+        let land = { [self] in
+            guard !landed else { return }
+            landed = true
+            then()
+            close()
+        }
+        // Whatever becomes of the animations' completion, the cover goes a beat after they should have ended.
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.flightDuration + 0.75) {
+            MainActor.assumeIsolated {
+                if !landed { Log.note("Transition: the flight's end never came; the cover goes anyway") }
+                land()
+            }
+        }
         CATransaction.begin()
         CATransaction.setAnimationDuration(Self.flightDuration)
         CATransaction.setAnimationTimingFunction(CAMediaTimingFunction(controlPoints: 0.3, 0.0, 0.2, 1.0))
-        CATransaction.setCompletionBlock { [weak self] in
-            MainActor.assumeIsolated {
-                then()
-                self?.close()
-            }
-        }
+        CATransaction.setCompletionBlock { MainActor.assumeIsolated { land() } }
         Self.animate(backdrop, opacity: 0)
         for (id, l) in fliers {
             // A tile off screen (the camera left zoomed in): the window heads its way and fades as it goes.
@@ -255,6 +267,25 @@ final class TransitionCover {
     func close() {
         window.orderOut(nil)
         fliers.removeAll()
+        lifetimeLimit?.cancel()
+    }
+
+    /// The longest a cover may stand, whatever happens around it: past this the screen is live again.
+    /// A going-in cover lasts the capture (1.5 s at most), the wait for pictures (5 s) and the flight.
+    static let longestLife: TimeInterval = 10
+    private var lifetimeLimit: DispatchWorkItem?
+
+    /// Takes the cover down after `longestLife` if nothing has (the window holds no reference back to
+    /// this object, so a lost one can't take it down any other way). Not for the cover going out: that one
+    /// goes with the process.
+    private func limitLifetime() {
+        let item = DispatchWorkItem { [window] in
+            guard window.isVisible else { return }
+            Log.note("Transition: a cover was still up after \(Int(Self.longestLife)) s; taken down")
+            window.orderOut(nil)
+        }
+        lifetimeLimit = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.longestLife, execute: item)
     }
 
     var ids: Set<CGWindowID> { Set(fliers.keys) }
