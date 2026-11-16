@@ -129,6 +129,32 @@ final class SourceBankGeometryTests: XCTestCase {
         XCTAssertEqual(SourceBankGeometry.bankSize(physical: [CGSize(width: 6016, height: 3384)]), CGSize(width: 4096, height: 3472))
     }
 
+    func testBanksGrowTallerForTheWindowsTheyMustHold() {
+        // The owner's eleven windows on 2026-11-16 (Blender full width): too many for 2560-point banks.
+        let windows = [CGSize(width: 3430, height: 1417), CGSize(width: 1198, height: 1393), CGSize(width: 1378, height: 1339),
+                       CGSize(width: 1331, height: 1417), CGSize(width: 1638, height: 976), CGSize(width: 1419, height: 900),
+                       CGSize(width: 1410, height: 897), CGSize(width: 723, height: 1143), CGSize(width: 900, height: 826),
+                       CGSize(width: 1052, height: 803), CGSize(width: 980, height: 761)]
+        let size = SourceBankGeometry.bankSize(physical: [CGSize(width: 3430, height: 1447)], windows: windows, banks: 2)
+        XCTAssertEqual(size.width, 3478)
+        XCTAssertGreaterThan(size.height, 3500)
+        XCTAssertLessThanOrEqual(size.height, 4096)
+        // And they all fit, packed in turn as the host packs them.
+        let banks = [CGRect(x: 3430, y: 0, width: size.width, height: size.height),
+                     CGRect(x: 3430 + size.width, y: 0, width: size.width, height: size.height)]
+        var occupied: [[CGRect]] = [[], []]
+        for w in windows {
+            let placed = banks.indices.lazy.compactMap { i in
+                SourceBankGeometry.slot(size: w, display: banks[i], occupied: occupied[i]).map { (i, $0) }
+            }.first
+            XCTAssertNotNil(placed, "\(w) found no slot")
+            if let (i, r) = placed { occupied[i].append(r) }
+        }
+        // A few small windows leave the floor as it was.
+        XCTAssertEqual(SourceBankGeometry.bankSize(physical: [CGSize(width: 3430, height: 1447)],
+                                                   windows: [CGSize(width: 800, height: 600)], banks: 2).height, 2560)
+    }
+
     func testTheLargestSlotIsABanksUsableArea() {
         let banks = [CGRect(x: -6956, y: 0, width: 3478, height: 2560), CGRect(x: -3478, y: 0, width: 3478, height: 2560)]
         XCTAssertEqual(SourceBankGeometry.largestSlot(banks: banks), CGSize(width: 3430, height: 2472))

@@ -73,7 +73,13 @@ final class SourceBankHost: @unchecked Sendable {
         physical = screens.map(\.visible)
         physicalIDs = Set(screens.map(\.id))
         let fps = SIPRedesign.frameRate(displayID: screens.first?.id ?? CGMainDisplayID())
-        let size = SourceBankGeometry.bankSize(physical: screens.map(\.frame.size))
+        // The windows there are now, as the canvas will ask to park them: other apps' ordinary windows.
+        let canvas = getppid(), me = getpid()
+        let windows = WindowList.onScreen()
+            .filter { $0.layer == 0 && $0.pid != canvas && $0.pid != me && $0.bounds.width >= 100 && $0.bounds.height >= 100 }
+            .map(\.bounds.size)
+        let size = SourceBankGeometry.bankSize(physical: screens.map(\.frame.size), windows: windows, banks: Int(SLSourceDisplayBankSlotCount))
+        Log.note("Window bank: \(SLSourceDisplayBankSlotCount) banks of \(Int(size.width))×\(Int(size.height)) pt for \(windows.count) window(s)")
         // Create the bank set before the canvas discovers physical displays.
         // Shared feeds replace the expensive per-window overflow streams.
         for slot in 0..<SLSourceDisplayBankSlotCount {

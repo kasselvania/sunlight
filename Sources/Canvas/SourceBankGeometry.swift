@@ -65,10 +65,19 @@ enum SourceBankGeometry {
     /// wide as the widest physical display, tall enough to let a window grow past the tallest one,
     /// within the virtual display's 8192-pixel limit at 2× (4096 points). A 3072-point bank couldn't
     /// hold a full-width window from a 3430-point ultrawide (measured 2026-11-13).
-    static func bankSize(physical: [CGSize]) -> CGSize {
+    ///
+    /// Taller still when the windows to hold need it (`windows`, across `banks` banks): their area with
+    /// half again for packing gaps. Eleven windows on the owner's ultrawide came to 17.6 M pt² against
+    /// 17 M pt² of room in two 2560-point banks; Mail, Zen and Blender were turned away and stayed out
+    /// of the canvas (2026-11-16). A taller bank costs window-server memory, so only when needed.
+    static func bankSize(physical: [CGSize], windows: [CGSize] = [], banks: Int = 2) -> CGSize {
         let wide = physical.map(\.width).max() ?? 0, tall = physical.map(\.height).max() ?? 0
-        return CGSize(width: min(4096, max(3072, (wide + 48).rounded(.up))),
-                      height: min(4096, max(2560, (tall + 88).rounded(.up))))
+        let width = min(4096, max(3072, (wide + 48).rounded(.up)))
+        let usableWidth = width - 48
+        let area = windows.reduce(0) { $0 + $1.width * $1.height }
+        let forWindows = banks > 0 && usableWidth > 0 ? (area * 1.5 / (CGFloat(banks) * usableWidth) + 88).rounded(.up) : 0
+        let tallestWindow = (windows.map(\.height).max() ?? 0) + 88
+        return CGSize(width: width, height: min(4096, max(2560, (tall + 88).rounded(.up), forWindows, tallestWindow.rounded(.up))))
     }
 
     /// The largest size a window can take in the bank: a resize past it is held to it, never answered

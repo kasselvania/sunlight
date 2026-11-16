@@ -676,3 +676,11 @@ completion held it weakly, so `close()` never ran. Now the flight holds the cove
 takes it down 0.75 s after the flight should have ended, and no going-in cover stands longer than 10 s.
 Same run: Zen (1331×1417) and Blender (3430×1417) "don't fit in the source banks" and stayed on the real
 display, live, outside the canvas.
+
+Build 37 checked live the same morning: the cover came down on time (no level-1000 window after the
+flight), the windows went back exactly at quit. Mail (1410×897), Zen and Blender were still turned away:
+the two 3478×2560 banks had 17 M pt² of room for 17.6 M pt² of windows (bank 300: Macky, System Settings,
+Discord, Claude, Messages; bank 301: T3 Code, ChatGPT, Lapis). The banks are now sized for the windows on
+screen when the host starts, area plus half for gaps, up to 4096 pt tall; with that morning's eleven
+windows they come to about 3940 pt and all eleven pack. Not yet run live: a bank that tall hasn't been
+made on this Mac.
